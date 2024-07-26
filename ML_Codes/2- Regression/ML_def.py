@@ -9,6 +9,7 @@ from matplotlib.patches import Patch
 import copy
 import logging
 import missingno
+import operator
 from collections import Counter
 from category_encoders import TargetEncoder, BinaryEncoder
 from imblearn.over_sampling import (
@@ -86,7 +87,7 @@ from sklearn.feature_selection import (
     mutual_info_classif, 
     mutual_info_regression
 )
-from sklearn.naive_bayes import GaussianNB
+from sklearn.naive_bayes import BernoulliNB, GaussianNB, MultinomialNB
 from sklearn.neighbors import (
     KNeighborsClassifier,
     KNeighborsRegressor,
@@ -101,6 +102,8 @@ from sklearn.tree import (
     DecisionTreeRegressor
 )
 from sklearn.ensemble import (
+    ExtraTreesClassifier,
+    ExtraTreesRegressor,
     RandomForestClassifier,
     BaggingClassifier,
     AdaBoostClassifier,
@@ -112,9 +115,11 @@ from sklearn.ensemble import (
     GradientBoostingRegressor,
     StackingRegressor
 )
+
 from xgboost import XGBClassifier, XGBRegressor
 from sklearn.metrics import (
     accuracy_score,
+    classification_report,
     recall_score,
     precision_score,
     f1_score,
@@ -650,6 +655,137 @@ def check_balance_classification(df: pd.DataFrame, column_plot: Optional[str] = 
     plt.show()
     
     return value_counts
+
+
+def get_columns_with_2_unique_values(df):
+    object_columns = df.select_dtypes(include=['object']).columns
+    columns_with_2_unique_values = [col for col in object_columns if df[col].nunique() == 2]
+    
+    unique_values_dict = {}
+    for col in columns_with_2_unique_values:
+        unique_vals = tuple(sorted(df[col].unique()))
+        if unique_vals not in unique_values_dict:
+            unique_values_dict[unique_vals] = []
+        unique_values_dict[unique_vals].append(col)
+    
+    result_dict = {
+        'columns_with_2_unique_name': list(unique_values_dict.values()),
+        'columns_with_2_unique_values': list(unique_values_dict.keys())
+    }
+    
+    df_list_of_columns_with_2_unique = pd.DataFrame(result_dict)
+    
+    for i in range(df_list_of_columns_with_2_unique.shape[0]):
+        col_names = df_list_of_columns_with_2_unique["columns_with_2_unique_name"].to_list()[i]
+        unique_vals = df_list_of_columns_with_2_unique["columns_with_2_unique_values"].to_list()[i]
+        print(f'The list: {col_names} unique values: {unique_vals}')
+
+
+def analyze_null_columns(df):
+    # Calculate null counts for each column
+    null_counts = df.isnull().sum()
+    
+    # Filter out columns with zero null counts
+    not_zero_null_counts = null_counts[null_counts > 0]
+    
+    # Get the data types for the filtered columns
+    column_types = df.dtypes[not_zero_null_counts.index]
+    
+    # Create the final DataFrame
+    null_columns = pd.DataFrame({
+        'Column': not_zero_null_counts.index,
+        'Null Count': not_zero_null_counts.values,
+        'Type': column_types.values
+    })
+    
+    # Sort the DataFrame by the 'Type' column
+    null_columns.sort_values(by='Type', inplace=True)
+    
+    # Separate columns by their data types
+    null_object_columns = null_columns[null_columns['Type'] == 'object']['Column'].to_list()
+    null_numerical_columns = (
+        null_columns[null_columns['Type'] == 'float64']['Column'].to_list() + 
+        null_columns[null_columns['Type'] == 'int64']['Column'].to_list()
+    )
+    
+    print(f'The columns dtype is object: {null_object_columns}')
+    print(f'The columns dtype is numerical: {null_numerical_columns}')
+    
+    return null_columns
+
+
+def rate_by_group(
+    df, 
+    group_col: str, 
+    target_col: str, 
+    id_col: str, 
+    positive_class: int = 1, 
+    threshold: int = 5,
+    print_output = True
+) -> pd.DataFrame:
+    """
+    Calculate the classification rate by group or range in a given DataFrame.
+
+    Args:
+    - df: pandas DataFrame containing the data.
+    - group_col: column name by which to group the data.
+    - target_col: column name of the target classification.
+    - id_col: column name for unique identification of entries.
+    - positive_class: value representing the positive class in the target column (default is 1).
+    - threshold: the minimum number of unique values in group_col to consider grouping by ranges.
+
+    Returns:
+    - A DataFrame with the classification rates by group or range.
+    """
+    n_unique_values = df[group_col].nunique()
+    group_classification_rates = {}
+
+    if n_unique_values <= threshold:
+        for group in df[group_col].unique():
+            total = df[df[group_col] == group][id_col].nunique()
+            classified = df[(df[target_col] == positive_class) & (df[group_col] == group)][id_col].nunique()
+            classification_rate = classified / total
+            group_classification_rates[group] = classification_rate
+            if print_output:
+                print(f"The classification rate of {group} in {group_col}: {classification_rate * 100:.2f}%\n")
+        
+        sorted_groups = sorted(group_classification_rates.keys(), key=lambda x: group_classification_rates[x], reverse=True)
+        sorted_classification_rates = {group: group_classification_rates[group] for group in sorted_groups}
+        
+        return pd.DataFrame(list(sorted_classification_rates.items()), columns=['name', 'values'])
+    
+    if len(df[group_col].unique()) > threshold and (pd.api.types.is_integer_dtype(df[group_col]) or pd.api.types.is_float_dtype(df[group_col])):
+        min_value = df[group_col].min()
+        max_value = df[group_col].max()
+        bin_size = (max_value - min_value) // threshold
+        bins = list(range(min_value, max_value, bin_size)) + [max_value + 1]
+        labels = [f"{bins[i]}-{bins[i+1]-1}" for i in range(len(bins)-1)]
+        df['range'] = pd.cut(df[group_col], bins=bins, labels=labels, include_lowest=True, right=False)
+        group_col_name = f'{group_col}_range'
+        group_col = 'range'
+    else:
+        group_col_name = group_col
+    
+    for group in df[group_col].unique():
+        total = df[df[group_col] == group][id_col].nunique()
+        classified = df[(df[target_col] == positive_class) & (df[group_col] == group)][id_col].nunique()
+        classification_rate = classified / total
+        group_classification_rates[group] = classification_rate
+    
+    # Determine sorting method based on data type of group_col
+    if pd.api.types.is_numeric_dtype(df[group_col]):
+        sorted_groups = sorted(group_classification_rates.keys(), key=lambda x: float(x.split('-')[0]) if '-' in x else float(x))
+    else:
+        sorted_groups = sorted(group_classification_rates.keys(), key=lambda x: group_classification_rates[x], reverse=True)
+    
+    for group in sorted_groups:
+        classification_rate = group_classification_rates[group]
+        if print_output:
+            print(f"The classification rate of {group} in {group_col_name}: {classification_rate * 100:.2f}%\n")
+    
+    group_of_range = {group: group_classification_rates[group] for group in sorted_groups}
+    
+    return pd.DataFrame(list(group_of_range.items()), columns=['name', 'values'])
 
 
 
@@ -1288,7 +1424,7 @@ def calculate_correlation(df: pd.DataFrame, outcome_column: Optional[str] = None
     
     return results_df
 
-def Heatmap_Correlation(df: pd.DataFrame, mask: float = 0, cmap: str = "YlGnBu", save_path: Optional[str] = None) -> pd.DataFrame:
+def Heatmap_Correlation(df: pd.DataFrame, mask: float = 0, cmap: str = "YlGnBu", save_path: Optional[str] = None, annot_size = 10, figsize=(20, 14)) -> pd.DataFrame:
     """
     Generates a heatmap to visualize the correlation matrix of numeric columns in the given DataFrame.
 
@@ -1310,24 +1446,24 @@ def Heatmap_Correlation(df: pd.DataFrame, mask: float = 0, cmap: str = "YlGnBu",
     correlations = numeric_columns.corr()
     
     # Create a figure and axis for the heatmap
-    plt.figure(figsize=(20, 11))
+    plt.figure(figsize=figsize)
     
     # Create a heatmap with customization
     heatmap = sns.heatmap(
         data=correlations,
-        annot=True,               # Annotate cells with the data value
-        fmt=".2f",                # Format the annotations to 2 decimal places
-        cmap=cmap,                # Colormap
-        cbar=True,                # Show color bar
-        cbar_kws={'label': 'Scale'},  # Color bar customization
-        linewidths=0.5,           # Line width between cells
-        linecolor='gray',         # Line color between cells
-        square=True,              # Force square cells
-        mask=correlations < mask, # Mask correlations below the threshold
-        annot_kws={"size": 10},   # Annotation font size
-        xticklabels=True,         # Show x-axis labels
-        yticklabels=True,         # Show y-axis labels
-        robust=True               # Robust colormap limits
+        annot=True,                     # Annotate cells with the data value
+        fmt=".2f",                      # Format the annotations to 2 decimal places
+        cmap=cmap,                      # Colormap
+        cbar=True,                      # Show color bar
+        cbar_kws={'label': 'Scale'},    # Color bar customization
+        linewidths=0.5,                 # Line width between cells
+        linecolor='gray',               # Line color between cells
+        square=True,                    # Force square cells
+        mask=correlations < mask,       # Mask correlations below the threshold
+        annot_kws={"size": annot_size}, # Annotation font size 
+        xticklabels=True,               # Show x-axis labels
+        yticklabels=True,               # Show y-axis labels
+        robust=True                     # Robust colormap limits
     )
     
     # Customize the plot
@@ -1423,7 +1559,7 @@ def create_custom_scatter_plot(df: pd.DataFrame,
 
 def plot_histograms(df: pd.DataFrame, column: Optional[Union[str, None]] = None, save_plots: bool = False, palette: str = 'magma',
                             bins: Optional[Union[int, list]] = 30, edgecolor: str = 'black', alpha: float = 0.9, kde: bool = True,
-                            multiple: Literal['layer', 'dodge', 'stack', 'fill'] = 'layer') -> None:
+                            multiple: Literal['layer', 'dodge', 'stack', 'fill'] = 'layer', show = True, single_histogram_figsize = (8, 6), all_histograms_figsize = (14, 12)) -> None:
     """
     Plots histograms for numerical columns in the dataframe using Seaborn.
     
@@ -1449,7 +1585,7 @@ def plot_histograms(df: pd.DataFrame, column: Optional[Union[str, None]] = None,
     """
     
     def plot_single_histogram(col_data: pd.Series, col_name: str, color: str) -> None:
-        plt.figure(figsize=(8, 6))
+        plt.figure(figsize=single_histogram_figsize)
         sns.histplot(col_data, kde=kde, color=color, bins=bins, edgecolor=edgecolor, alpha=alpha, multiple=multiple)
         plt.title(f"Histogram for {col_name}")
         plt.tight_layout()
@@ -1463,7 +1599,7 @@ def plot_histograms(df: pd.DataFrame, column: Optional[Union[str, None]] = None,
         nrows = int(np.ceil(num_columns / ncols))
         colors = sns.color_palette(palette, num_columns)
 
-        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(14, 12))
+        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=all_histograms_figsize)
         for index, col in enumerate(numerical_cols.columns):
             ax = axes.flatten()[index]
             sns.histplot(df[col], kde=kde, color=colors[index], bins=bins, edgecolor=edgecolor, alpha=alpha, multiple=multiple, ax=ax)
@@ -1477,7 +1613,8 @@ def plot_histograms(df: pd.DataFrame, column: Optional[Union[str, None]] = None,
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         if save_plots:
             plt.savefig("all_histograms.png")
-        plt.show()
+        if show:
+            plt.show()
     
     try:
         numerical_columns = df.select_dtypes(include=['int64', 'float64'])
@@ -1504,6 +1641,8 @@ def encode_column(
     ordinal_categories: Optional[List[str]] = None, 
     target: Optional[str] = None, 
     n_features: Optional[int] = None,
+    binary_1: str = None,
+    binary_0: str = None,
     binary_default: bool = True
 ) -> pd.DataFrame:
     """
@@ -1544,11 +1683,14 @@ def encode_column(
 
     """
     
-    def binary_encode(df: pd.DataFrame, column: str) -> pd.DataFrame:
+    def binary_encode(df: pd.DataFrame, column: str, binary_1: str = None, binary_0: str = None) -> pd.DataFrame:
         unique_vals = df[column].dropna().unique()
         if len(unique_vals) != 2:
             raise ValueError("Column must have exactly two unique non-NaN values.")
-        df[column] = df[column].apply(lambda x: 1 if x == unique_vals[0] else (0 if x == unique_vals[1] else np.nan))
+        if binary_1 is not None and binary_0 is not None:
+            df[column] = df[column].apply(lambda x: 1 if x == binary_1 else (0 if x == binary_0 else np.nan))
+        elif binary_1 not in unique_vals or binary_0 not in unique_vals or binary_1 is None or binary_0 is None:
+            df[column] = df[column].apply(lambda x: 1 if x == unique_vals[0] else (0 if x == unique_vals[1] else np.nan))
         return df
 
     def label_encode(df: pd.DataFrame, column: str) -> pd.DataFrame:
@@ -1657,7 +1799,62 @@ def encode_column(
     return df
 
 
-def get_x_y_TVT(df: pd.DataFrame, target: Optional[str] = None, test_size: float = 0.2, train_size: float = 0.8, valid_size: float = 0.12) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
+def get_x_y(df,target:Optional[str] = None):
+    if target == None:
+        x=df.iloc[:,:-1]
+        y=df.iloc[:,-1]
+    else:
+        x=df.drop(target,axis=1)
+        y=df[target]
+    return x,y
+
+
+def get_x_y_TT(df: pd.DataFrame, target: Optional[str] = None, test_size: float = 0.2, stratify: bool = False, shuffle: bool = True, random_state: Optional[int] = 42) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
+    """
+    Splits the dataframe into training and test sets.
+    
+    Parameters:
+    df (pd.DataFrame): The input dataframe.
+    target (Optional[str]): The target column. If None, the last column is used as the target.
+    test_size (float): The proportion of the dataset to include in the test split. Default is 0.2.
+    stratify (bool): Whether to stratify based on the target column. Default is False.
+    shuffle (bool): Whether or not to shuffle the data before splitting. Default is True.
+    random_state (Optional[int]): Controls the shuffling applied to the data before splitting. Pass an int for reproducible output. Default is 42.
+    
+    Returns:
+    Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]: Returns x_train, y_train, x_test, y_test.
+    """
+    
+    def split_data(df: pd.DataFrame, target: Optional[str], test_size: float, stratify: bool, shuffle: bool, random_state: Optional[int]) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
+        """Splits the data into training and test sets."""
+        x, y = extract_features_and_target(df, target)
+        stratify_col = None
+        if stratify:
+            if y.nunique() < 20:  # This is a simple heuristic; you might want to adjust it
+                stratify_col = y
+            else:
+                print("Stratification is not applicable for regression data. Continuing without stratification.")
+                stratify = False
+        x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=test_size, stratify=stratify_col, shuffle=shuffle, random_state=random_state)
+        return x_train, y_train, x_test, y_test
+    
+    def extract_features_and_target(df: pd.DataFrame, target: Optional[str]) -> Tuple[pd.DataFrame, pd.Series]:
+        """Extracts features and target from the dataframe."""
+        if target is None:
+            x = df.iloc[:, :-1]
+            y = df.iloc[:, -1]
+        else:
+            x = df.drop(target, axis=1)
+            y = df[target]
+        return x, y
+
+    try:
+        return split_data(df, target, test_size, stratify, shuffle, random_state)
+    except Exception as e:
+        raise ValueError(f"An error occurred while splitting the data: {e}")
+
+
+def get_x_y_TVT(df: pd.DataFrame, target: Optional[str] = None, test_size: float = 0.2, valid_size: float = 0.12, stratify: bool = False, shuffle: bool = True, random_state: Optional[int] = 42) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
     """
     Splits the dataframe into training, validation, and test sets.
     
@@ -1667,16 +1864,26 @@ def get_x_y_TVT(df: pd.DataFrame, target: Optional[str] = None, test_size: float
     test_size (float): The proportion of the dataset to include in the test split. Default is 0.2.
     train_size (float): The proportion of the dataset to include in the train split. Default is 0.8.
     valid_size (float): The proportion of the training dataset to include in the validation split. Default is 0.12.
+    stratify (bool): Whether to stratify based on the target column. Default is False.
+    shuffle (bool): Whether or not to shuffle the data before splitting. Default is True.
+    random_state (Optional[int]): Controls the shuffling applied to the data before splitting. Pass an int for reproducible output. Default is 42.
     
     Returns:
     Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]: Returns x_train, y_train, x_valid, y_valid, x_test, y_test.
     """
     
-    def split_data(df: pd.DataFrame, target: Optional[str], test_size: float, train_size: float, valid_size: float) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
+    def split_data_TVT(df: pd.DataFrame, target: Optional[str], test_size: float, valid_size: float, stratify: bool, shuffle: bool, random_state: Optional[int]) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
         """Splits the data into training, validation, and test sets."""
         x, y = extract_features_and_target(df, target)
-        x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=test_size, train_size=train_size, random_state=42)
-        x_train, x_valid, y_train, y_valid = train_test_split(x_train, y_train, test_size=valid_size, train_size=(1 - valid_size), random_state=42)
+        stratify_col = None
+        if stratify:
+            if y.nunique() < 20:  # This is a simple heuristic; you might want to adjust it
+                stratify_col = y
+            else:
+                print("Stratification is not applicable for regression data. Continuing without stratification.")
+                stratify = False
+        x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=test_size, stratify=stratify_col, shuffle=shuffle, random_state=random_state)
+        x_train, x_valid, y_train, y_valid = train_test_split(x_train, y_train, test_size=valid_size, shuffle=shuffle, random_state=random_state)
         return x_train, y_train, x_valid, y_valid, x_test, y_test
     
     def extract_features_and_target(df: pd.DataFrame, target: Optional[str]) -> Tuple[pd.DataFrame, pd.Series]:
@@ -1690,9 +1897,37 @@ def get_x_y_TVT(df: pd.DataFrame, target: Optional[str] = None, test_size: float
         return x, y
 
     try:
-        return split_data(df, target, test_size, train_size, valid_size)
+        return split_data_TVT(df, target, test_size, valid_size, stratify, shuffle, random_state)
     except Exception as e:
         raise ValueError(f"An error occurred while splitting the data: {e}")
+
+
+def get_x_y_TT_shape(x_train: pd.DataFrame, y_train: pd.Series, x_test: pd.DataFrame, y_test: pd.Series) -> None:
+    """
+    Prints the shapes of training, validation, and test datasets.
+
+    Parameters:
+    x_train (pd.DataFrame): The training features.
+    y_train (pd.Series): The training labels.
+    x_test (pd.DataFrame): The test features.
+    y_test (pd.Series): The test labels.
+
+    Returns:
+    None
+    """
+    
+    def print_shape(data: pd.DataFrame, label: str) -> None:
+        """Prints the shape of a given dataset."""
+        print(f'{label} shape = {data.shape}')
+    
+    try:
+        print_shape(x_train, 'x_train')
+        print_shape(x_test, 'x_test')
+        print_shape(y_train, 'y_train')
+        print_shape(y_test, 'y_test')
+    except Exception as e:
+        raise ValueError(f"An error occurred while printing shapes: {e}")
+    
 
 def get_x_y_TVT_shape(x_train: pd.DataFrame, y_train: pd.Series, x_valid: pd.DataFrame, y_valid: pd.Series, x_test: pd.DataFrame, y_test: pd.Series) -> None:
     """
@@ -1723,6 +1958,43 @@ def get_x_y_TVT_shape(x_train: pd.DataFrame, y_train: pd.Series, x_valid: pd.Dat
         print_shape(y_test, 'y_test')
     except Exception as e:
         raise ValueError(f"An error occurred while printing shapes: {e}")
+
+
+def validate_test_data_categorical_columns(x_train, x_test, x_valid):
+    x_train_categorical_columns = x_train.select_dtypes(include=['object', 'category']).columns.tolist()
+    x_test_categorical_columns = x_test.select_dtypes(include=['object', 'category']).columns.tolist()
+    x_valid_categorical_columns = x_valid.select_dtypes(include=['object', 'category']).columns.tolist()
+    
+    if set(x_train_categorical_columns) != set(x_test_categorical_columns) or set(x_train_categorical_columns) != set(x_valid_categorical_columns):
+        print('Train, test, and validation dataframes have different categorical columns')
+        print('Train categorical columns:', x_train_categorical_columns)
+        print('Test categorical columns:', x_test_categorical_columns)
+        print('Validation categorical columns:', x_valid_categorical_columns)
+        return
+    
+    all_columns_consistent = True
+    
+    for cat_col in x_train_categorical_columns:
+        if cat_col not in x_test_categorical_columns or cat_col not in x_valid_categorical_columns:
+            print(f'Column {cat_col} is missing in test or validation DataFrame')
+            all_columns_consistent = False
+            continue
+        
+        train_col = set(x for x in x_train[cat_col].unique().tolist() if not pd.isna(x))
+        test_col = set(x for x in x_test[cat_col].unique().tolist() if not pd.isna(x))
+        valid_col = set(x for x in x_valid[cat_col].unique().tolist() if not pd.isna(x))
+        
+        if train_col != test_col or train_col != valid_col:
+            print(f'{cat_col} column has different unique values in train, test, and validation data:')
+            print(f'Unique values in train data: {train_col}')
+            print(f'Unique values in test data: {test_col}')
+            print(f'Unique values in validation data: {valid_col}')
+            all_columns_consistent = False
+    
+    if all_columns_consistent:
+        print('All categorical columns have consistent unique values in train, test, and validation data.')
+    else:
+        print('Some categorical columns have inconsistencies. Please review the above differences.')
 
 
 
@@ -2056,13 +2328,22 @@ def get_cross_validator(cv_type: Literal['KFold', 'StratifiedKFold', 'LeaveOneOu
     return type_cross_valid
 
 
-def grid_search_classifier(model_name: str, x_train: np.ndarray, y_train: np.ndarray, scoring: str = 'recall', cv=5, ensemble_estimators: Optional[List[Tuple[str, object]]] = None) -> Tuple[dict, float, object]:
+def grid_search_classifier(
+        model_name: Literal['LogisticRegression', 'GaussianNB', 'MultinomialNB', 'BernoulliNB', 'KNN', 'SVM', 
+                            'DecisionTree', 'RandomForest', 'GradientBoosting', 'XGBoost', 
+                            'ExtraTrees', 'Bagging', 'AdaBoost', 'Stacking'],
+        x_train: np.ndarray,
+        y_train: np.ndarray,
+        scoring: Literal['accuracy', 'precision', 'recall', 'f1'] = 'recall',
+        perfect_params: bool = False,
+        cv: int = 5,
+        ensemble_estimators: Optional[List[Tuple[str, object]]] = None
+    ) -> Tuple[dict, float, object]:
     """
     Perform grid search on a specified classification model to find the best hyperparameters.
 
     Parameters:
     model_name (str): The name of the classification model to use.
-                    ['LogisticRegression', 'NaiveBayes', 'KNN', 'SVM', 'DecisionTree', 'RandomForest', 'BaggingClassifier', 'AdaBoostClassifier', 'GradientBoostingClassifier', 'XGBoost', 'StackingClassifier']
     x_train (np.ndarray): The training input samples.
     y_train (np.ndarray): The target values (class labels) as integers or strings.
     scoring (str): The scoring metric to evaluate the models. Default is 'recall'.
@@ -2071,14 +2352,14 @@ def grid_search_classifier(model_name: str, x_train: np.ndarray, y_train: np.nda
     Returns:
     Tuple[dict, float, object]: The best hyperparameters found by grid search, the best cross-validation score achieved, and the best estimator found by grid search.
     """
+    
     if ensemble_estimators is None:
         ensemble_estimators = [
-                ('rf', RandomForestClassifier(n_jobs=-1)),
-                ('gb', GradientBoostingClassifier()),
-                ('xgb', XGBClassifier())
-            ]
+            ('rf', RandomForestClassifier(n_jobs=-1)),
+            ('gb', GradientBoostingClassifier()),
+            ('xgb', XGBClassifier())
+        ]
     
-    # Dictionary mapping model names to models and their hyperparameter grids
     model_params = {
         'LogisticRegression': {
             'model': LogisticRegression(),
@@ -2087,9 +2368,22 @@ def grid_search_classifier(model_name: str, x_train: np.ndarray, y_train: np.nda
                 'solver': ['liblinear', 'lbfgs']
             }
         },
-        'NaiveBayes': {
+        'GaussianNB': {
             'model': GaussianNB(),
             'params': {}
+        },
+        'MultinomialNB': {
+            'model': MultinomialNB(),
+            'params': {
+                'alpha': [0.01, 0.1, 1, 10, 100]
+            }
+        },
+        'BernoulliNB': {
+            'model': BernoulliNB(),
+            'params': {
+                'alpha': [0.01, 0.1, 1, 10, 100],
+                'binarize': [0.0, 0.5, 1.0]
+            }
         },
         'KNN': {
             'model': KNeighborsClassifier(),
@@ -2119,22 +2413,7 @@ def grid_search_classifier(model_name: str, x_train: np.ndarray, y_train: np.nda
                 'max_depth': [None, 5, 10, 20, 30]
             }
         },
-        'BaggingClassifier': {
-            'model': BaggingClassifier(n_jobs=-1),
-            'params': {
-                'n_estimators': [10, 50, 100, 200],
-                'max_samples': [0.5, 1.0],
-                'max_features': [0.5, 1.0]
-            }
-        },
-        'AdaBoostClassifier': {
-            'model': AdaBoostClassifier(),
-            'params': {
-                'n_estimators': [10, 50, 100, 200],
-                'learning_rate': [0.01, 0.1, 0.5, 1, 10]
-            }
-        },
-        'GradientBoostingClassifier': {
+        'GradientBoosting': {
             'model': GradientBoostingClassifier(),
             'params': {
                 'n_estimators': [10, 50, 100, 200],
@@ -2145,12 +2424,39 @@ def grid_search_classifier(model_name: str, x_train: np.ndarray, y_train: np.nda
         'XGBoost': {
             'model': XGBClassifier(),
             'params': {
-                'n_estimators': [10, 50, 100],
+                'n_estimators': [50, 100, 200, 300],
                 'learning_rate': [0.01, 0.1, 0.2],
-                'max_depth': [3, 5, 7]
+                'max_depth': [3, 5, 7, 10],
+                'min_child_weight': [1, 3, 5],
+                'gamma': [0, 0.1, 0.2]
             }
         },
-        'StackingClassifier': {
+        'ExtraTrees': {
+            'model': ExtraTreesClassifier(n_jobs=-1),
+            'params': {
+                'n_estimators': [100, 200, 300],
+                'max_depth': [None, 5, 10, 20, 30],
+                'min_samples_split': [2, 5, 10],
+                'min_samples_leaf': [1, 2, 4],
+                'max_features': [None, 'auto', 'sqrt', 'log2']
+            }
+        },
+        'Bagging': {
+            'model': BaggingClassifier(n_jobs=-1),
+            'params': {
+                'n_estimators': [10, 50, 100, 200],
+                'max_samples': [0.5, 1.0],
+                'max_features': [0.5, 1.0]
+            }
+        },
+        'AdaBoost': {
+            'model': AdaBoostClassifier(),
+            'params': {
+                'n_estimators': [10, 50, 100, 200],
+                'learning_rate': [0.01, 0.1, 0.5, 1, 10]
+            }
+        },
+        'Stacking': {
             'model': StackingClassifier(n_jobs=-1, estimators=ensemble_estimators),
             'params': {
                 'final_estimator': [LogisticRegression(), RandomForestClassifier(), GradientBoostingClassifier()],
@@ -2159,118 +2465,142 @@ def grid_search_classifier(model_name: str, x_train: np.ndarray, y_train: np.nda
         }
     }
     
-    perfect_model_params = {
-        'LogisticRegression': {
-            'model': LogisticRegression(),
-            'params': {
-                'penalty': ['l1', 'l2', 'elasticnet', 'none'],
-                'C': [0.01, 0.1, 1, 10, 100],
-                'solver': ['liblinear', 'lbfgs', 'newton-cg', 'sag', 'saga'],
-                'max_iter': [100, 200, 300]
+    if perfect_params:
+        model_params.update({
+            'LogisticRegression': {
+                'model': LogisticRegression(),
+                'params': {
+                    'penalty': ['l1', 'l2', 'elasticnet', 'none'],
+                    'C': [0.01, 0.1, 1, 10, 100],
+                    'solver': ['liblinear', 'lbfgs', 'newton-cg', 'sag', 'saga'],
+                    'max_iter': [100, 200, 300]
+                }
+            },
+            'GaussianNB': {
+                'model': GaussianNB(),
+                'params': {
+                    'var_smoothing': [1e-09, 1e-08, 1e-07, 1e-06, 1e-05, 1e-04, 1e-03]
+                }
+            },
+            'MultinomialNB': {
+                'model': MultinomialNB(),
+                'params': {
+                    'alpha': [0.01, 0.1, 1, 10, 100]
+                }
+            },
+            'BernoulliNB': {
+                'model': BernoulliNB(),
+                'params': {
+                    'alpha': [0.01, 0.1, 1, 10, 100],
+                    'binarize': [0.0, 0.5, 1.0]
+                }
+            },
+            'KNN': {
+                'model': KNeighborsClassifier(),
+                'params': {
+                    'n_neighbors': [3, 5, 7, 9, 11],
+                    'weights': ['uniform', 'distance'],
+                    'algorithm': ['auto', 'ball_tree', 'kd_tree', 'brute'],
+                    'p': [1, 2]
+                }
+            },
+            'SVM': {
+                'model': SVC(),
+                'params': {
+                    'C': [0.1, 1, 10, 100],
+                    'kernel': ['linear', 'poly', 'rbf', 'sigmoid'],
+                    'gamma': ['scale', 'auto'],
+                    'degree': [2, 3, 4],
+                    'probability': [True, False]
+                }
+            },
+            'DecisionTree': {
+                'model': DecisionTreeClassifier(),
+                'params': {
+                    'criterion': ['gini', 'entropy'],
+                    'splitter': ['best', 'random'],
+                    'max_depth': [None, 5, 10, 20, 30],
+                    'min_samples_split': [2, 5, 10],
+                    'min_samples_leaf': [1, 2, 4],
+                    'max_features': [None, 'auto', 'sqrt', 'log2']
+                }
+            },
+            'RandomForest': {
+                'model': RandomForestClassifier(n_jobs=-1),
+                'params': {
+                    'n_estimators': [100, 200, 300],
+                    'criterion': ['gini', 'entropy'],
+                    'max_depth': [None, 5, 10, 20, 30],
+                    'min_samples_split': [2, 5, 10],
+                    'min_samples_leaf': [1, 2, 4],
+                    'max_features': [None, 'auto', 'sqrt', 'log2'],
+                    'bootstrap': [True, False]
+                }
+            },
+            'Bagging': {
+                'model': BaggingClassifier(n_jobs=-1),
+                'params': {
+                    'n_estimators': [10, 50, 100, 200],
+                    'max_samples': [0.5, 0.7, 1.0],
+                    'max_features': [0.5, 0.7, 1.0],
+                    'bootstrap': [True, False],
+                    'bootstrap_features': [True, False]
+                }
+            },
+            'AdaBoost': {
+                'model': AdaBoostClassifier(),
+                'params': {
+                    'n_estimators': [50, 100, 200, 300],
+                    'learning_rate': [0.01, 0.1, 0.5, 1, 10],
+                    'algorithm': ['SAMME', 'SAMME.R']
+                }
+            },
+            'GradientBoosting': {
+                'model': GradientBoostingClassifier(),
+                'params': {
+                    'loss': ['deviance', 'exponential'],
+                    'learning_rate': [0.01, 0.1, 0.2, 0.5],
+                    'n_estimators': [100, 200, 300],
+                    'max_depth': [3, 5, 7],
+                    'min_samples_split': [2, 5, 10],
+                    'min_samples_leaf': [1, 2, 4],
+                    'max_features': [None, 'auto', 'sqrt', 'log2']
+                }
+            },
+            'XGBoost': {
+                'model': XGBClassifier(),
+                'params': {
+                    'learning_rate': [0.01, 0.1, 0.2, 0.3],
+                    'n_estimators': [100, 200, 300],
+                    'max_depth': [3, 5, 7],
+                    'min_child_weight': [1, 3, 5],
+                    'gamma': [0, 0.1, 0.2],
+                    'subsample': [0.7, 0.8, 1.0],
+                    'colsample_bytree': [0.7, 0.8, 1.0],
+                    'reg_alpha': [0, 0.1, 0.5],
+                    'reg_lambda': [1, 1.5, 2]
+                }
+            },
+            'ExtraTrees': {
+                'model': ExtraTreesClassifier(n_jobs=-1),
+                'params': {
+                    'n_estimators': [100, 200, 300],
+                    'max_depth': [None, 5, 10, 20, 30],
+                    'min_samples_split': [2, 5, 10],
+                    'min_samples_leaf': [1, 2, 4],
+                    'max_features': [None, 'auto', 'sqrt', 'log2']
+                }
+            },
+            'Stacking': {
+                'model': StackingClassifier(n_jobs=-1, estimators=ensemble_estimators),
+                'params': {
+                    'final_estimator': [LogisticRegression(), RandomForestClassifier(), GradientBoostingClassifier()],
+                    'cv': [5, 10],
+                    'stack_method': ['auto', 'predict_proba', 'decision_function', 'predict']
+                }
             }
-        },
-        'NaiveBayes': {
-            'model': GaussianNB(),
-            'params': {
-                'var_smoothing': [1e-09, 1e-08, 1e-07, 1e-06, 1e-05, 1e-04, 1e-03]
-            }
-        },
-        'KNN': {
-            'model': KNeighborsClassifier(),
-            'params': {
-                'n_neighbors': [3, 5, 7, 9, 11],
-                'weights': ['uniform', 'distance'],
-                'algorithm': ['auto', 'ball_tree', 'kd_tree', 'brute'],
-                'p': [1, 2]
-            }
-        },
-        'SVM': {
-            'model': SVC(),
-            'params': {
-                'C': [0.1, 1, 10, 100],
-                'kernel': ['linear', 'poly', 'rbf', 'sigmoid'],
-                'gamma': ['scale', 'auto'],
-                'degree': [2, 3, 4],
-                'probability': [True, False]
-            }
-        },
-        'DecisionTree': {
-            'model': DecisionTreeClassifier(),
-            'params': {
-                'criterion': ['gini', 'entropy'],
-                'splitter': ['best', 'random'],
-                'max_depth': [None, 5, 10, 20, 30],
-                'min_samples_split': [2, 5, 10],
-                'min_samples_leaf': [1, 2, 4],
-                'max_features': [None, 'auto', 'sqrt', 'log2']
-            }
-        },
-        'RandomForest': {
-            'model': RandomForestClassifier(n_jobs=-1),
-            'params': {
-                'n_estimators': [100, 200, 300],
-                'criterion': ['gini', 'entropy'],
-                'max_depth': [None, 5, 10, 20, 30],
-                'min_samples_split': [2, 5, 10],
-                'min_samples_leaf': [1, 2, 4],
-                'max_features': [None, 'auto', 'sqrt', 'log2'],
-                'bootstrap': [True, False]
-            }
-        },
-        'BaggingClassifier': {
-            'model': BaggingClassifier(n_jobs=-1),
-            'params': {
-                'n_estimators': [10, 50, 100, 200],
-                'max_samples': [0.5, 0.7, 1.0],
-                'max_features': [0.5, 0.7, 1.0],
-                'bootstrap': [True, False],
-                'bootstrap_features': [True, False]
-            }
-        },
-        'AdaBoostClassifier': {
-            'model': AdaBoostClassifier(),
-            'params': {
-                'n_estimators': [50, 100, 200, 300],
-                'learning_rate': [0.01, 0.1, 0.5, 1, 10],
-                'algorithm': ['SAMME', 'SAMME.R']
-            }
-        },
-        'GradientBoostingClassifier': {
-            'model': GradientBoostingClassifier(),
-            'params': {
-                'loss': ['deviance', 'exponential'],
-                'learning_rate': [0.01, 0.1, 0.2, 0.5],
-                'n_estimators': [100, 200, 300],
-                'max_depth': [3, 5, 7],
-                'min_samples_split': [2, 5, 10],
-                'min_samples_leaf': [1, 2, 4],
-                'max_features': [None, 'auto', 'sqrt', 'log2']
-            }
-        },
-        'XGBoost': {
-            'model': XGBClassifier(),
-            'params': {
-                'learning_rate': [0.01, 0.1, 0.2, 0.3],
-                'n_estimators': [100, 200, 300],
-                'max_depth': [3, 5, 7],
-                'min_child_weight': [1, 3, 5],
-                'gamma': [0, 0.1, 0.2],
-                'subsample': [0.7, 0.8, 1.0],
-                'colsample_bytree': [0.7, 0.8, 1.0],
-                'reg_alpha': [0, 0.1, 0.5],
-                'reg_lambda': [1, 1.5, 2]
-            }
-        },
-        'StackingClassifier': {
-            'model': StackingClassifier(n_jobs=-1, estimators= ensemble_estimators),
-            'params': {
-                'final_estimator': [LogisticRegression(), RandomForestClassifier(), GradientBoostingClassifier()],
-                'cv': [5, 10],
-                'stack_method': ['auto', 'predict_proba', 'decision_function', 'predict']
-            }
-        }
-    }
-    
+        })
+
     if model_name not in model_params:
         raise ValueError(f"Model {model_name} not recognized. Available models: {list(model_params.keys())}")
     
@@ -2293,233 +2623,284 @@ def grid_search_classifier(model_name: str, x_train: np.ndarray, y_train: np.nda
 
 
 
-def grid_search_regressor(model_name: str, x_train: np.ndarray, y_train: np.ndarray, scoring: str = 'neg_mean_squared_error', cv=5, ensemble_estimators: Optional[List[Tuple[str, object]]] = None) -> Tuple[Dict[str, Union[int, float, str]], float, object]:
+def grid_search_regressor(
+        model_name: Literal['LinearRegression', 'Ridge', 'Lasso', 'ElasticNet', 'KNN', 'SVR', 
+                            'DecisionTree', 'RandomForest', 'GradientBoosting', 'XGBoost', 
+                            'ExtraTrees', 'Bagging', 'AdaBoost', 'Stacking'],
+        x_train: np.ndarray,
+        y_train: np.ndarray,
+        scoring: Literal['neg_mean_squared_error', 'neg_mean_absolute_error', 'r2'] = 'neg_mean_squared_error',
+        perfect_params: bool = False,
+        cv: int = 5,
+        ensemble_estimators: Optional[List[Tuple[str, object]]] = None
+    ) -> Tuple[Dict[str, Union[int, float, str]], float, object]:
     """
     Perform grid search on a specified regression model to find the best hyperparameters.
 
     Parameters:
     model_name (str): The name of the regression model to use.
-                    ['LinearRegression', 'Ridge', 'Lasso', 'KNeighborsRegressor', 'SVR', 'DecisionTreeRegressor', 'RandomForestRegressor', 'BaggingRegressor', 'AdaBoostRegressor', 'GradientBoostingRegressor', 'XGBoost', 'StackingRegressor']
     x_train (np.ndarray): The training input samples.
     y_train (np.ndarray): The target values (regression output).
     scoring (str): The scoring metric to evaluate the models. Default is 'neg_mean_squared_error'.
-    ensemble_estimators (Optional[List[Tuple[str, object]]]): List of estimators for ensemble methods (Bagging, Stacking).
+    perfect_params (bool): Whether to use complex parameter grids. Default is False.
+    cv (int): Number of cross-validation folds. Default is 5.
+    ensemble_estimators (Optional[List[Tuple[str, object]]]): List of estimators for ensemble methods (Bagging, Stacking). Default is None.
 
     Returns:
-    Tuple[Dict[str, Union[int, float, str]], float, object]: The best hyperparameters found by grid search, the best cross-validation score achieved, and the best estimator found by grid search.
+    Tuple[Dict[str, Union[int, float, str]], float, object]: The best hyperparameters found by grid search, 
+    the best cross-validation score achieved, and the best estimator found by grid search.
     """
+    
     if ensemble_estimators is None:
         ensemble_estimators = [
-                ('rf', RandomForestRegressor(n_jobs=-1)),
-                ('gb', GradientBoostingRegressor()),
-                ('xgb', XGBRegressor())
-            ]
-    # Dictionary mapping model names to models and their hyperparameter grids
-    model_params = {
-        'LinearRegression': {
-            'model': LinearRegression(),
-            'params': {}
-        },
-        'Ridge': {
-            'model': Ridge(),
-            'params': {
-                'alpha': [0.01, 0.1, 1, 10, 100]
-            }
-        },
-        'Lasso': {
-            'model': Lasso(),
-            'params': {
-                'alpha': [0.01, 0.1, 1, 10, 100]
-            }
-        },
-        'KNeighborsRegressor': {
-            'model': KNeighborsRegressor(),
-            'params': {
-                'n_neighbors': [3, 5, 7, 9],
-                'weights': ['uniform', 'distance']
-            }
-        },
-        'SVR': {
-            'model': SVR(),
-            'params': {
-                'C': [0.1, 1, 10, 100],
-                'kernel': ['linear', 'rbf']
-            }
-        },
-        'DecisionTreeRegressor': {
-            'model': DecisionTreeRegressor(),
-            'params': {
-                'max_depth': [None, 5, 10, 20, 30],
-                'min_samples_split': [2, 5, 10]
-            }
-        },
-        'RandomForestRegressor': {
-            'model': RandomForestRegressor(),
-            'params': {
-                'n_estimators': [100, 200, 300],
-                'max_depth': [None, 5, 10, 20, 30]
-            }
-        },
-        'BaggingRegressor': {
-            'model': BaggingRegressor(),
-            'params': {
-                'n_estimators': [10, 50, 100],
-                'max_samples': [0.5, 1.0],
-                'max_features': [0.5, 1.0]
-            }
-        },
-        'AdaBoostRegressor': {
-            'model': AdaBoostRegressor(),
-            'params': {
-                'n_estimators': [10, 50, 100],
-                'learning_rate': [0.01, 0.1, 1, 10]
-            }
-        },
-        'GradientBoostingRegressor': {
-            'model': GradientBoostingRegressor(),
-            'params': {
-                'n_estimators': [10, 50, 100],
-                'learning_rate': [0.01, 0.1, 0.2],
-                'max_depth': [3, 5, 7]
-            }
-        },
-        'XGBoost': {
-            'model': XGBRegressor(),
-            'params': {
-                'n_estimators': [10, 50, 100],
-                'learning_rate': [0.01, 0.1, 0.2],
-                'max_depth': [3, 5, 7]
-            }
-        },
-        'StackingRegressor': {
-            'model': StackingRegressor(estimators=ensemble_estimators),
-            'params': {
-                'final_estimator': [LinearRegression(), Ridge(), GradientBoostingRegressor()],
-                'cv': [5, 10]
-            }
-        }
-    }
+            ('rf', RandomForestRegressor(n_jobs=-1)),
+            ('gb', GradientBoostingRegressor()),
+            ('xgb', XGBRegressor())
+        ]
     
-    perfect_model_params = {
-        'LinearRegression': {
-            'model': LinearRegression(),
-            'params': {
-                'fit_intercept': [True, False],
-                'normalize': [True, False]
-            }
-        },
-        'Ridge': {
-            'model': Ridge(),
-            'params': {
-                'alpha': [0.01, 0.1, 1, 10, 100],
-                'fit_intercept': [True, False],
-                'normalize': [True, False],
-                'solver': ['auto', 'svd', 'cholesky', 'lsqr', 'sag', 'saga']
-            }
-        },
-        'Lasso': {
-            'model': Lasso(),
-            'params': {
-                'alpha': [0.01, 0.1, 1, 10, 100],
-                'fit_intercept': [True, False],
-                'normalize': [True, False],
-                'max_iter': [1000, 2000, 3000]
-            }
-        },
-        'KNeighborsRegressor': {
-            'model': KNeighborsRegressor(),
-            'params': {
-                'n_neighbors': [3, 5, 7, 9],
-                'weights': ['uniform', 'distance'],
-                'algorithm': ['auto', 'ball_tree', 'kd_tree', 'brute'],
-                'p': [1, 2]
-            }
-        },
-        'SVR': {
-            'model': SVR(),
-            'params': {
-                'C': [0.1, 1, 10, 100],
-                'kernel': ['linear', 'poly', 'rbf', 'sigmoid'],
-                'degree': [2, 3, 4],
-                'gamma': ['scale', 'auto'],
-                'epsilon': [0.1, 0.2, 0.5]
-            }
-        },
-        'DecisionTreeRegressor': {
-            'model': DecisionTreeRegressor(),
-            'params': {
-                'criterion': ['mse', 'friedman_mse', 'mae'],
-                'splitter': ['best', 'random'],
-                'max_depth': [None, 5, 10, 20, 30],
-                'min_samples_split': [2, 5, 10],
-                'min_samples_leaf': [1, 2, 4],
-                'max_features': [None, 'auto', 'sqrt', 'log2']
-            }
-        },
-        'RandomForestRegressor': {
-            'model': RandomForestRegressor(n_jobs=-1),
-            'params': {
-                'n_estimators': [100, 200, 300],
-                'criterion': ['mse', 'mae'],
-                'max_depth': [None, 5, 10, 20, 30],
-                'min_samples_split': [2, 5, 10],
-                'min_samples_leaf': [1, 2, 4],
-                'max_features': [None, 'auto', 'sqrt', 'log2'],
-                'bootstrap': [True, False]
-            }
-        },
-        'BaggingRegressor': {
-            'model': BaggingRegressor(n_jobs=-1),
-            'params': {
-                'n_estimators': [10, 50, 100, 200],
-                'max_samples': [0.5, 0.7, 1.0],
-                'max_features': [0.5, 0.7, 1.0],
-                'bootstrap': [True, False],
-                'bootstrap_features': [True, False]
-            }
-        },
-        'AdaBoostRegressor': {
-            'model': AdaBoostRegressor(),
-            'params': {
-                'n_estimators': [50, 100, 200, 300],
-                'learning_rate': [0.01, 0.1, 0.5, 1, 10],
-                'loss': ['linear', 'square', 'exponential']
-            }
-        },
-        'GradientBoostingRegressor': {
-            'model': GradientBoostingRegressor(),
-            'params': {
-                'loss': ['ls', 'lad', 'huber', 'quantile'],
-                'learning_rate': [0.01, 0.1, 0.2, 0.5],
-                'n_estimators': [100, 200, 300],
-                'max_depth': [3, 5, 7],
-                'min_samples_split': [2, 5, 10],
-                'min_samples_leaf': [1, 2, 4],
-                'max_features': [None, 'auto', 'sqrt', 'log2']
-            }
-        },
-        'XGBoost': {
-            'model': XGBRegressor(),
-            'params': {
-                'learning_rate': [0.01, 0.1, 0.2, 0.3],
-                'n_estimators': [100, 200, 300],
-                'max_depth': [3, 5, 7],
-                'min_child_weight': [1, 3, 5],
-                'gamma': [0, 0.1, 0.2],
-                'subsample': [0.7, 0.8, 1.0],
-                'colsample_bytree': [0.7, 0.8, 1.0],
-                'reg_alpha': [0, 0.1, 0.5],
-                'reg_lambda': [1, 1.5, 2]
-            }
-        },
-        'StackingRegressor': {
-            'model': StackingRegressor(estimators=ensemble_estimators),
-            'params': {
-                'final_estimator': [LinearRegression(), Ridge(), GradientBoostingRegressor()],
-                'cv': [5, 10]
+    if not perfect_params:
+        model_params = {
+            'LinearRegression': {
+                'model': LinearRegression(),
+                'params': {}
+            },
+            'Ridge': {
+                'model': Ridge(),
+                'params': {
+                    'alpha': [0.01, 0.1, 1, 10, 100]
+                }
+            },
+            'Lasso': {
+                'model': Lasso(),
+                'params': {
+                    'alpha': [0.01, 0.1, 1, 10, 100]
+                }
+            },
+            'ElasticNet': {
+                'model': ElasticNet(),
+                'params': {
+                    'alpha': [0.01, 0.1, 1, 10, 100],
+                    'l1_ratio': [0.1, 0.5, 0.9]
+                }
+            },
+            'KNN': {
+                'model': KNeighborsRegressor(),
+                'params': {
+                    'n_neighbors': [3, 5, 7, 9],
+                    'weights': ['uniform', 'distance']
+                }
+            },
+            'SVR': {
+                'model': SVR(),
+                'params': {
+                    'C': [0.1, 1, 10, 100],
+                    'kernel': ['linear', 'rbf']
+                }
+            },
+            'DecisionTree': {
+                'model': DecisionTreeRegressor(),
+                'params': {
+                    'max_depth': [None, 5, 10, 20, 30],
+                    'min_samples_split': [2, 5, 10]
+                }
+            },
+            'RandomForest': {
+                'model': RandomForestRegressor(),
+                'params': {
+                    'n_estimators': [100, 200, 300],
+                    'max_depth': [None, 5, 10, 20, 30]
+                }
+            },
+            'GradientBoosting': {
+                'model': GradientBoostingRegressor(),
+                'params': {
+                    'n_estimators': [10, 50, 100],
+                    'learning_rate': [0.01, 0.1, 0.2],
+                    'max_depth': [3, 5, 7]
+                }
+            },
+            'XGBoost': {
+                'model': XGBRegressor(),
+                'params': {
+                    'n_estimators': [10, 50, 100],
+                    'learning_rate': [0.01, 0.1, 0.2],
+                    'max_depth': [3, 5, 7]
+                }
+            },
+            'ExtraTrees': {
+                'model': ExtraTreesRegressor(n_jobs=-1),
+                'params': {
+                    'n_estimators': [100, 200, 300],
+                    'max_depth': [None, 5, 10, 20, 30],
+                    'min_samples_split': [2, 5, 10],
+                    'min_samples_leaf': [1, 2, 4],
+                    'max_features': [None, 'auto', 'sqrt', 'log2']
+                }
+            },
+            'Bagging': {
+                'model': BaggingRegressor(n_jobs=-1),
+                'params': {
+                    'n_estimators': [10, 50, 100],
+                    'max_samples': [0.5, 1.0],
+                    'max_features': [0.5, 1.0]
+                }
+            },
+            'AdaBoost': {
+                'model': AdaBoostRegressor(),
+                'params': {
+                    'n_estimators': [10, 50, 100],
+                    'learning_rate': [0.01, 0.1, 1, 10]
+                }
+            },
+            'Stacking': {
+                'model': StackingRegressor(estimators=ensemble_estimators),
+                'params': {
+                    'final_estimator': [LinearRegression(), Ridge(), GradientBoostingRegressor()],
+                    'cv': [5, 10]
+                }
             }
         }
-    }
+    else:
+        model_params = {
+            'LinearRegression': {
+                'model': LinearRegression(),
+                'params': {
+                    'fit_intercept': [True, False],
+                    'normalize': [True, False]
+                }
+            },
+            'Ridge': {
+                'model': Ridge(),
+                'params': {
+                    'alpha': [0.01, 0.1, 1, 10, 100],
+                    'fit_intercept': [True, False],
+                    'normalize': [True, False],
+                    'solver': ['auto', 'svd', 'cholesky', 'lsqr', 'sag', 'saga']
+                }
+            },
+            'Lasso': {
+                'model': Lasso(),
+                'params': {
+                    'alpha': [0.01, 0.1, 1, 10, 100],
+                    'fit_intercept': [True, False],
+                    'normalize': [True, False],
+                    'max_iter': [1000, 2000, 3000]
+                }
+            },
+            'ElasticNet': {
+                'model': ElasticNet(),
+                'params': {
+                    'alpha': [0.01, 0.1, 1, 10, 100],
+                    'l1_ratio': [0.1, 0.5, 0.9],
+                    'fit_intercept': [True, False],
+                    'normalize': [True, False],
+                    'max_iter': [1000, 2000, 3000]
+                }
+            },
+            'KNN': {
+                'model': KNeighborsRegressor(),
+                'params': {
+                    'n_neighbors': [3, 5, 7, 9, 11],
+                    'weights': ['uniform', 'distance'],
+                    'algorithm': ['auto', 'ball_tree', 'kd_tree', 'brute'],
+                    'p': [1, 2]
+                }
+            },
+            'SVR': {
+                'model': SVR(),
+                'params': {
+                    'C': [0.1, 1, 10, 100],
+                    'kernel': ['linear', 'poly', 'rbf', 'sigmoid'],
+                    'degree': [2, 3, 4],
+                    'gamma': ['scale', 'auto'],
+                    'epsilon': [0.1, 0.2, 0.5]
+                }
+            },
+            'DecisionTree': {
+                'model': DecisionTreeRegressor(),
+                'params': {
+                    'criterion': ['mse', 'friedman_mse', 'mae'],
+                    'splitter': ['best', 'random'],
+                    'max_depth': [None, 5, 10, 20, 30],
+                    'min_samples_split': [2, 5, 10],
+                    'min_samples_leaf': [1, 2, 4],
+                    'max_features': [None, 'auto', 'sqrt', 'log2']
+                }
+            },
+            'RandomForest': {
+                'model': RandomForestRegressor(n_jobs=-1),
+                'params': {
+                    'n_estimators': [100, 200, 300],
+                    'criterion': ['mse', 'mae'],
+                    'max_depth': [None, 5, 10, 20, 30],
+                    'min_samples_split': [2, 5, 10],
+                    'min_samples_leaf': [1, 2, 4],
+                    'max_features': [None, 'auto', 'sqrt', 'log2'],
+                    'bootstrap': [True, False]
+                }
+            },
+            'ExtraTrees': {
+                'model': ExtraTreesRegressor(n_jobs=-1),
+                'params': {
+                    'n_estimators': [100, 200, 300],
+                    'max_depth': [None, 5, 10, 20, 30],
+                    'min_samples_split': [2, 5, 10],
+                    'min_samples_leaf': [1, 2, 4],
+                    'max_features': [None, 'auto', 'sqrt', 'log2']
+                }
+            },
+            'Bagging': {
+                'model': BaggingRegressor(n_jobs=-1),
+                'params': {
+                    'n_estimators': [10, 50, 100, 200],
+                    'max_samples': [0.5, 0.7, 1.0],
+                    'max_features': [0.5, 0.7, 1.0],
+                    'bootstrap': [True, False],
+                    'bootstrap_features': [True, False]
+                }
+            },
+            'AdaBoost': {
+                'model': AdaBoostRegressor(),
+                'params': {
+                    'n_estimators': [50, 100, 200, 300],
+                    'learning_rate': [0.01, 0.1, 0.5, 1, 10],
+                    'loss': ['linear', 'square', 'exponential']
+                }
+            },
+            'GradientBoosting': {
+                'model': GradientBoostingRegressor(),
+                'params': {
+                    'loss': ['ls', 'lad', 'huber', 'quantile'],
+                    'learning_rate': [0.01, 0.1, 0.2, 0.5],
+                    'n_estimators': [100, 200, 300],
+                    'max_depth': [3, 5, 7],
+                    'min_samples_split': [2, 5, 10],
+                    'min_samples_leaf': [1, 2, 4],
+                    'max_features': [None, 'auto', 'sqrt', 'log2']
+                }
+            },
+            'XGBoost': {
+                'model': XGBRegressor(),
+                'params': {
+                    'learning_rate': [0.01, 0.1, 0.2, 0.3],
+                    'n_estimators': [100, 200, 300],
+                    'max_depth': [3, 5, 7],
+                    'min_child_weight': [1, 3, 5],
+                    'gamma': [0, 0.1, 0.2],
+                    'subsample': [0.7, 0.8, 1.0],
+                    'colsample_bytree': [0.7, 0.8, 1.0],
+                    'reg_alpha': [0, 0.1, 0.5],
+                    'reg_lambda': [1, 1.5, 2]
+                }
+            },
+            'Stacking': {
+                'model': StackingRegressor(estimators=ensemble_estimators),
+                'params': {
+                    'final_estimator': [LinearRegression(), Ridge(), GradientBoostingRegressor()],
+                    'cv': [5, 10]
+                }
+            }
+        }
     
     if model_name not in model_params:
         raise ValueError(f"Model {model_name} not recognized. Available models: {list(model_params.keys())}")
@@ -2541,31 +2922,46 @@ def grid_search_regressor(model_name: str, x_train: np.ndarray, y_train: np.ndar
     
     return best_params, best_score, best_estimator
 
-def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.ndarray, ensemble_estimators: Optional[List[Tuple[str, object]]] = None, scoring: str = 'recall', cv=5, n_iter: int = 100) -> Tuple[Dict[str, Union[int, float, str]], float, object]:
+
+
+def random_search_classifier(
+        model_name: Literal['LogisticRegression', 'GaussianNB', 'MultinomialNB', 'BernoulliNB', 'KNN', 'SVM', 
+                            'DecisionTree', 'RandomForest', 'GradientBoosting','XGBoost', 
+                            'ExtraTrees', 'Bagging', 'AdaBoost', 'Stacking'],
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        scoring: Literal['accuracy', 'precision', 'recall', 'f1'] = 'recall',
+        perfect_params: bool = False,
+        n_iter: int = 50,
+        cv: int = 5,
+        ensemble_estimators: Optional[List[Tuple[str, object]]] = None
+    ) -> Tuple[Dict[str, Union[int, float, str]], float, object]:
     """
     Perform random search on a specified classification model to find the best hyperparameters.
 
     Parameters:
     model_name (str): The name of the classification model to use.
-                    ['LogisticRegression', 'NaiveBayes', 'KNeighborsClassifier', 'SVC', 'DecisionTreeClassifier', 'RandomForestClassifier', 'BaggingClassifier', 'AdaBoostClassifier', 'GradientBoostingClassifier', 'XGBoost', 'StackingClassifier']
     X_train (np.ndarray): The training input samples.
     y_train (np.ndarray): The target values (class labels) as integers or strings.
-    ensemble_estimators (Optional[List[Tuple[str, object]]]): List of estimators for ensemble methods (Bagging, Stacking). Default is None.
     scoring (str): The scoring metric to evaluate the models. Default is 'recall'.
+    perfect_params (bool): Whether to use complex parameter grids. Default is False.
     n_iter (int): Number of parameter settings that are sampled. Default is 100.
+    cv (int): Number of cross-validation folds. Default is 5.
+    ensemble_estimators (Optional[List[Tuple[str, object]]]): List of estimators for ensemble methods (Bagging, Stacking). Default is None.
 
     Returns:
-    Tuple[Dict[str, Union[int, float, str]], float, object]: The best hyperparameters found by random search, the best cross-validation score achieved, and the best estimator found by random search.
+    Tuple[Dict[str, Union[int, float, str]], float, object]: The best hyperparameters found by random search, 
+    the best cross-validation score achieved, and the best estimator found by random search.
     """
+    
     if ensemble_estimators is None:
         ensemble_estimators = [
-                ('rf', RandomForestClassifier(n_jobs=-1)),
-                ('gb', GradientBoostingClassifier()),
-                ('xgb', XGBClassifier())
-            ]
+            ('rf', RandomForestClassifier(n_jobs=-1)),
+            ('gb', GradientBoostingClassifier()),
+            ('xgb', XGBClassifier())
+        ]
     
     def get_model_params() -> Dict[str, Dict[str, Union[object, Dict[str, Union[list, object]]]]]:
-        """Returns the dictionary mapping model names to models and their hyperparameter distributions."""
         return {
             'LogisticRegression': {
                 'model': LogisticRegression(),
@@ -2574,54 +2970,52 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'solver': ['liblinear', 'lbfgs']
                 }
             },
-            'NaiveBayes': {
+            'GaussianNB': {
                 'model': GaussianNB(),
                 'params': {}
             },
-            'KNeighborsClassifier': {
+            'MultinomialNB': {
+                'model': MultinomialNB(),
+                'params': {
+                    'alpha': uniform(0.01, 100)
+                }
+            },
+            'BernoulliNB': {
+                'model': BernoulliNB(),
+                'params': {
+                    'alpha': uniform(0.01, 100),
+                    'binarize': uniform(0.0, 1.0)
+                }
+            },
+            'KNN': {
                 'model': KNeighborsClassifier(),
                 'params': {
                     'n_neighbors': randint(3, 10),
                     'weights': ['uniform', 'distance']
                 }
             },
-            'SVC': {
+            'SVM': {
                 'model': SVC(),
                 'params': {
                     'C': uniform(0.1, 100),
                     'kernel': ['linear', 'rbf']
                 }
             },
-            'DecisionTreeClassifier': {
+            'DecisionTree': {
                 'model': DecisionTreeClassifier(),
                 'params': {
                     'max_depth': [None] + list(range(1, 31)),
                     'min_samples_split': randint(2, 11)
                 }
             },
-            'RandomForestClassifier': {
+            'RandomForest': {
                 'model': RandomForestClassifier(),
                 'params': {
                     'n_estimators': randint(10, 101),
                     'max_depth': [None] + list(range(10, 31))
                 }
             },
-            'BaggingClassifier': {
-                'model': BaggingClassifier(),
-                'params': {
-                    'n_estimators': randint(10, 101),
-                    'max_samples': uniform(0.5, 1.0),
-                    'max_features': uniform(0.5, 1.0)
-                }
-            },
-            'AdaBoostClassifier': {
-                'model': AdaBoostClassifier(),
-                'params': {
-                    'n_estimators': randint(10, 101),
-                    'learning_rate': uniform(0.01, 10)
-                }
-            },
-            'GradientBoostingClassifier': {
+            'GradientBoosting': {
                 'model': GradientBoostingClassifier(),
                 'params': {
                     'n_estimators': randint(10, 101),
@@ -2637,16 +3031,41 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'max_depth': randint(3, 8)
                 }
             },
-            'StackingClassifier': {
-                'model': StackingClassifier(estimators=ensemble_estimators),
+            'ExtraTrees': {
+                'model': ExtraTreesClassifier(n_jobs=-1),
+                'params': {
+                    'n_estimators': randint(10, 101),
+                    'max_depth': [None] + list(range(10, 31)),
+                    'min_samples_split': randint(2, 11),
+                    'min_samples_leaf': randint(1, 11),
+                    'max_features': [None, 'auto', 'sqrt', 'log2']
+                }
+            },
+            'Bagging': {
+                'model': BaggingClassifier(n_jobs=-1),
+                'params': {
+                    'n_estimators': randint(10, 101),
+                    'max_samples': uniform(0.5, 1.0),
+                    'max_features': uniform(0.5, 1.0)
+                }
+            },
+            'AdaBoost': {
+                'model': AdaBoostClassifier(),
+                'params': {
+                    'n_estimators': randint(10, 101),
+                    'learning_rate': uniform(0.01, 10)
+                }
+            },
+            'Stacking': {
+                'model': StackingClassifier(n_jobs=-1, estimators=ensemble_estimators),
                 'params': {
                     'final_estimator': [LogisticRegression(), RandomForestClassifier(), GradientBoostingClassifier()],
                     'cv': [5, 10]
                 }
             }
         }
+    
     def get_model_perfect_params() -> Dict[str, Dict[str, Union[object, Dict[str, Union[list, object]]]]]:
-        """Returns the dictionary mapping model names to models and their hyperparameter distributions."""
         return {
             'LogisticRegression': {
                 'model': LogisticRegression(),
@@ -2657,11 +3076,26 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'max_iter': randint(100, 500)
                 }
             },
-            'NaiveBayes': {
+            'GaussianNB': {
                 'model': GaussianNB(),
-                'params': {}
+                'params': {
+                    'var_smoothing': uniform(1e-09, 1e-03)
+                }
             },
-            'KNeighborsClassifier': {
+            'MultinomialNB': {
+                'model': MultinomialNB(),
+                'params': {
+                    'alpha': uniform(0.01, 100)
+                }
+            },
+            'BernoulliNB': {
+                'model': BernoulliNB(),
+                'params': {
+                    'alpha': uniform(0.01, 100),
+                    'binarize': uniform(0.0, 1.0)
+                }
+            },
+            'KNN': {
                 'model': KNeighborsClassifier(),
                 'params': {
                     'n_neighbors': randint(3, 50),
@@ -2670,7 +3104,7 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'leaf_size': randint(20, 50)
                 }
             },
-            'SVC': {
+            'SVM': {
                 'model': SVC(),
                 'params': {
                     'C': uniform(0.1, 100),
@@ -2680,7 +3114,7 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'coef0': uniform(0, 1)
                 }
             },
-            'DecisionTreeClassifier': {
+            'DecisionTree': {
                 'model': DecisionTreeClassifier(),
                 'params': {
                     'criterion': ['gini', 'entropy'],
@@ -2690,7 +3124,7 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'max_features': ['auto', 'sqrt', 'log2', None]
                 }
             },
-            'RandomForestClassifier': {
+            'RandomForest': {
                 'model': RandomForestClassifier(),
                 'params': {
                     'n_estimators': randint(50, 200),
@@ -2702,8 +3136,8 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'bootstrap': [True, False]
                 }
             },
-            'BaggingClassifier': {
-                'model': BaggingClassifier(),
+            'Bagging': {
+                'model': BaggingClassifier(n_jobs=-1),
                 'params': {
                     'n_estimators': randint(10, 200),
                     'max_samples': uniform(0.5, 1.0),
@@ -2712,7 +3146,7 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'bootstrap_features': [True, False]
                 }
             },
-            'AdaBoostClassifier': {
+            'AdaBoost': {
                 'model': AdaBoostClassifier(),
                 'params': {
                     'n_estimators': randint(50, 200),
@@ -2720,7 +3154,7 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'algorithm': ['SAMME', 'SAMME.R']
                 }
             },
-            'GradientBoostingClassifier': {
+            'GradientBoosting': {
                 'model': GradientBoostingClassifier(),
                 'params': {
                     'n_estimators': randint(50, 200),
@@ -2746,16 +3180,27 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'reg_lambda': uniform(0.5, 2)
                 }
             },
-            'StackingClassifier': {
-                'model': StackingClassifier(estimators=ensemble_estimators),
+            'ExtraTrees': {
+                'model': ExtraTreesClassifier(n_jobs=-1),
+                'params': {
+                    'n_estimators': randint(50, 200),
+                    'max_depth': [None] + list(range(10, 31)),
+                    'min_samples_split': randint(2, 20),
+                    'min_samples_leaf': randint(1, 20),
+                    'max_features': ['auto', 'sqrt', 'log2', None]
+                }
+            },
+            'Stacking': {
+                'model': StackingClassifier(n_jobs=-1, estimators=ensemble_estimators),
                 'params': {
                     'final_estimator': [LogisticRegression(), RandomForestClassifier(), GradientBoostingClassifier()],
-                    'cv': [5, 10]
+                    'cv': [5, 10],
+                    'stack_method': ['auto', 'predict_proba', 'decision_function', 'predict']
                 }
             }
         }
-    
-    model_params = get_model_params()
+
+    model_params = get_model_params() if not perfect_params else get_model_perfect_params()
     
     if model_name not in model_params:
         raise ValueError(f"Model {model_name} not recognized. Available models: {list(model_params.keys())}")
@@ -2777,31 +3222,28 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
     
     return best_params, best_score, best_estimator
 
-def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.ndarray, ensemble_estimators: Optional[List[Tuple[str, object]]] = None, scoring: str = 'neg_mean_squared_error', cv=5, n_iter: int = 100) -> Tuple[Dict[str, Union[int, float, str]], float, object]:
-    """
-    Perform random search on a specified regression model to find the best hyperparameters.
 
-    Parameters:
-    model_name (str): The name of the regression model to use.
-                    ['LinearRegression', 'Ridge', 'Lasso', 'KNeighborsRegressor', 'SVR', 'DecisionTreeRegressor', 'RandomForestRegressor', 'BaggingRegressor', 'AdaBoostRegressor', 'GradientBoostingRegressor', 'XGBoost', 'StackingRegressor']
-    X_train (np.ndarray): The training input samples.
-    y_train (np.ndarray): The target values (regression output).
-    ensemble_estimators (Optional[List[Tuple[str, object]]]): List of estimators for ensemble methods (Bagging, Stacking). Default is None.
-    scoring (str): The scoring metric to evaluate the models. Default is 'neg_mean_squared_error'.
-    n_iter (int): Number of parameter settings that are sampled. Default is 100.
 
-    Returns:
-    Tuple[Dict[str, Union[int, float, str]], float, object]: The best hyperparameters found by random search, the best cross-validation score achieved, and the best estimator found by random search.
-    """
+def random_search_regressor(model_name: Literal['LinearRegression', 'Ridge', 'Lasso', 'ElasticNet', 'KNN', 'SVR', 
+                            'DecisionTree', 'RandomForest', 'GradientBoosting', 'XGBoost', 
+                            'ExtraTrees', 'Bagging', 'AdaBoost', 'Stacking'],
+                            X_train: np.ndarray, 
+                            y_train: np.ndarray, 
+                            scoring: Literal['neg_mean_squared_error', 'neg_mean_absolute_error', 'r2'] = 'neg_mean_squared_error',
+                            perfect_params: bool = False,
+                            n_iter: int = 100,
+                            cv=5, 
+                            ensemble_estimators: Optional[List[Tuple[str, object]]] = None, 
+) -> Tuple[Dict[str, Union[int, float, str]], float, object]:
+
     if ensemble_estimators is None:
         ensemble_estimators = [
-                ('rf', RandomForestRegressor(n_jobs=-1)),
-                ('gb', GradientBoostingRegressor()),
-                ('xgb', XGBRegressor())
-            ]
+            ('rf', RandomForestRegressor(n_jobs=-1)),
+            ('gb', GradientBoostingRegressor()),
+            ('xgb', XGBRegressor())
+        ]
     
     def get_model_params() -> Dict[str, Dict[str, Union[object, Dict[str, Union[list, object]]]]]:
-        """Returns the dictionary mapping model names to models and their hyperparameter distributions."""
         return {
             'LinearRegression': {
                 'model': LinearRegression(),
@@ -2819,7 +3261,14 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                     'alpha': uniform(0.01, 100)
                 }
             },
-            'KNeighborsRegressor': {
+            'ElasticNet': {
+                'model': ElasticNet(),
+                'params': {
+                    'alpha': uniform(0.01, 100),
+                    'l1_ratio': uniform(0, 1)
+                }
+            },
+            'KNN': {
                 'model': KNeighborsRegressor(),
                 'params': {
                     'n_neighbors': randint(3, 10),
@@ -2833,36 +3282,21 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                     'kernel': ['linear', 'rbf']
                 }
             },
-            'DecisionTreeRegressor': {
+            'DecisionTree': {
                 'model': DecisionTreeRegressor(),
                 'params': {
                     'max_depth': [None] + list(range(1, 31)),
                     'min_samples_split': randint(2, 11)
                 }
             },
-            'RandomForestRegressor': {
+            'RandomForest': {
                 'model': RandomForestRegressor(),
                 'params': {
                     'n_estimators': randint(10, 101),
                     'max_depth': [None] + list(range(10, 31))
                 }
             },
-            'BaggingRegressor': {
-                'model': BaggingRegressor(),
-                'params': {
-                    'n_estimators': randint(10, 101),
-                    'max_samples': uniform(0.5, 1.0),
-                    'max_features': uniform(0.5, 1.0)
-                }
-            },
-            'AdaBoostRegressor': {
-                'model': AdaBoostRegressor(),
-                'params': {
-                    'n_estimators': randint(10, 101),
-                    'learning_rate': uniform(0.01, 10)
-                }
-            },
-            'GradientBoostingRegressor': {
+            'GradientBoosting': {
                 'model': GradientBoostingRegressor(),
                 'params': {
                     'n_estimators': randint(10, 101),
@@ -2878,7 +3312,29 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                     'max_depth': randint(3, 8)
                 }
             },
-            'StackingRegressor': {
+            'ExtraTrees': {
+                'model': ExtraTreesRegressor(),
+                'params': {
+                    'n_estimators': randint(10, 101),
+                    'max_depth': [None] + list(range(10, 31))
+                }
+            },
+            'Bagging': {
+                'model': BaggingRegressor(),
+                'params': {
+                    'n_estimators': randint(10, 101),
+                    'max_samples': uniform(0.5, 1.0),
+                    'max_features': uniform(0.5, 1.0)
+                }
+            },
+            'AdaBoost': {
+                'model': AdaBoostRegressor(),
+                'params': {
+                    'n_estimators': randint(10, 101),
+                    'learning_rate': uniform(0.01, 10)
+                }
+            },
+            'Stacking': {
                 'model': StackingRegressor(estimators=ensemble_estimators),
                 'params': {
                     'final_estimator': [LinearRegression(), Ridge(), GradientBoostingRegressor()],
@@ -2886,8 +3342,8 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                 }
             }
         }
+
     def get_model_perfect_params() -> Dict[str, Dict[str, Union[object, Dict[str, Union[list, object]]]]]:
-        """Returns the dictionary mapping model names to models and their hyperparameter distributions."""
         return {
             'LinearRegression': {
                 'model': LinearRegression(),
@@ -2907,7 +3363,15 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                     'max_iter': randint(100, 1000)
                 }
             },
-            'KNeighborsRegressor': {
+            'ElasticNet': {
+                'model': ElasticNet(),
+                'params': {
+                    'alpha': uniform(0.01, 100),
+                    'l1_ratio': uniform(0, 1),
+                    'max_iter': randint(100, 1000)
+                }
+            },
+            'KNN': {
                 'model': KNeighborsRegressor(),
                 'params': {
                     'n_neighbors': randint(3, 50),
@@ -2926,7 +3390,7 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                     'coef0': uniform(0, 1)
                 }
             },
-            'DecisionTreeRegressor': {
+            'DecisionTree': {
                 'model': DecisionTreeRegressor(),
                 'params': {
                     'criterion': ['mse', 'friedman_mse', 'mae', 'poisson'],
@@ -2936,7 +3400,7 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                     'max_features': ['auto', 'sqrt', 'log2', None]
                 }
             },
-            'RandomForestRegressor': {
+            'RandomForest': {
                 'model': RandomForestRegressor(),
                 'params': {
                     'n_estimators': randint(50, 200),
@@ -2948,7 +3412,18 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                     'bootstrap': [True, False]
                 }
             },
-            'BaggingRegressor': {
+            'ExtraTrees': {
+                'model': ExtraTreesRegressor(),
+                'params': {
+                    'n_estimators': randint(50, 200),
+                    'max_depth': [None] + list(range(10, 31)),
+                    'min_samples_split': randint(2, 20),
+                    'min_samples_leaf': randint(1, 20),
+                    'max_features': ['auto', 'sqrt', 'log2', None],
+                    'bootstrap': [True, False]
+                }
+            },
+            'Bagging': {
                 'model': BaggingRegressor(),
                 'params': {
                     'n_estimators': randint(10, 200),
@@ -2958,7 +3433,7 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                     'bootstrap_features': [True, False]
                 }
             },
-            'AdaBoostRegressor': {
+            'AdaBoost': {
                 'model': AdaBoostRegressor(),
                 'params': {
                     'n_estimators': randint(50, 200),
@@ -2966,7 +3441,7 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                     'loss': ['linear', 'square', 'exponential']
                 }
             },
-            'GradientBoostingRegressor': {
+            'GradientBoosting': {
                 'model': GradientBoostingRegressor(),
                 'params': {
                     'n_estimators': randint(50, 200),
@@ -2992,7 +3467,7 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                     'reg_lambda': uniform(0.5, 2)
                 }
             },
-            'StackingRegressor': {
+            'Stacking': {
                 'model': StackingRegressor(estimators=ensemble_estimators),
                 'params': {
                     'final_estimator': [LinearRegression(), Ridge(), GradientBoostingRegressor()],
@@ -3001,7 +3476,7 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
             }
         }
     
-    model_params = get_model_params()
+    model_params = get_model_perfect_params() if perfect_params else get_model_params()
     
     if model_name not in model_params:
         raise ValueError(f"Model {model_name} not recognized. Available models: {list(model_params.keys())}")
@@ -3023,26 +3498,125 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
     
     return best_params, best_score, best_estimator
 
-def get_classifier(model_name: str, x_train: Any, y_train: Any, plot: bool = False, **kwargs: Any) -> Union[
-    LogisticRegression, GaussianNB, KNeighborsClassifier, SVC, 
-    DecisionTreeClassifier, RandomForestClassifier, BaggingClassifier, 
-    AdaBoostClassifier, GradientBoostingClassifier, XGBClassifier, StackingClassifier]:
+
+def plot_feature_importance(
+    model: Any, 
+    x_train: Any, 
+    feature_names: Optional[List[str]] = None, 
+    title: Optional[str] = None,
+    palette: str = 'viridis', 
+    top_n: Literal[None,'first','last'] = None, # 'first' for top 10, 'last' for bottom 10, None for all
+    orientation: str = 'vertical',
+    figsize: Optional[tuple] = (10, 6),
+    bar_width: float = 0.8
+) -> None:
+    """
+    Plot feature importances for tree-based models or coefficients for linear models.
+
+    Parameters:
+        model (Any): The trained model.
+        x_train (Any): Training data features.
+        feature_names (Optional[List[str]]): List of feature names. If not provided, will use x_train's column names or default to indices.
+        title (Optional[str]): Title of the plot. Automatically set based on `top_n` if not provided.
+        palette (str): Color palette for the plot.
+        top_n (Optional[str]): 'first' for top 10 features, 'last' for bottom 10 features, None for all features.
+        orientation (str): Orientation of the plot ('vertical' or 'horizontal').
+        figsize (Optional[tuple]): Size of the figure.
+        bar_width (float): Width of the bars.
+    """
+    try:
+        # Determine feature importances or coefficients
+        if hasattr(model, 'feature_importances_'):
+            importances = model.feature_importances_
+        elif hasattr(model, 'coef_'):
+            if model.coef_.ndim > 1:  # Multiclass classification case
+                importances = np.mean(np.abs(model.coef_), axis=0)
+            else:
+                importances = model.coef_
+        else:
+            print("Model does not have feature importances or coefficients.")
+            return
+
+        # Use provided feature names or fall back to x_train's columns or indices
+        if feature_names is None:
+            feature_names = x_train.columns if hasattr(x_train, 'columns') else np.arange(x_train.shape[1])
+
+        # Sort features by importance
+        sorted_indices = np.argsort(importances)[::-1]
+        importances = importances[sorted_indices]
+        feature_names = np.array(feature_names)[sorted_indices]
+
+        # Select top_n or bottom_n features
+        if top_n == 'first':
+            importances = importances[:10]
+            feature_names = feature_names[:10]
+            plot_title = 'Top 10 Feature Importances'
+        elif top_n == 'last':
+            importances = importances[-10:][::-1] # Reverse order for last 10
+            feature_names = feature_names[-10:][::-1]
+            plot_title = 'The Worst 10 Feature Importances'
+        else:
+            plot_title = 'Feature Importances'
+
+        # Use provided title if available
+        plot_title = title if title else plot_title
+
+        # Create the plot
+        sns.set(style="whitegrid")
+        plt.figure(figsize=figsize)
+        if orientation == 'vertical':
+            sns.barplot(x=importances, y=feature_names, palette=palette, ci=None, width=bar_width)
+            plt.xlabel('Importance')
+            plt.ylabel('Feature')
+            plt.gca().xaxis.set_major_locator(plt.MaxNLocator(integer=True)) # Many numbers on x-axis
+        else:
+            sns.barplot(y=importances, x=feature_names, palette=palette, ci=None, width=bar_width)
+            plt.xlabel('Importance')
+            plt.ylabel('Feature')
+            plt.xticks(rotation=45)
+            plt.gca().yaxis.set_major_locator(plt.MaxNLocator(integer=True)) # Many numbers on y-axis
+
+        plt.title(plot_title)
+        plt.show()
+    except Exception as e:
+        print(f"An error occurred while plotting: {e}")
+
+def get_classifier(
+    model_name: Literal[
+        'logistic_regression', 'gaussian_nb', 'multinomial_nb', 'bernoulli_nb',
+        'kneighbors_classifier', 'svc', 'decision_tree_classifier', 'random_forest_classifier',
+        'bagging_classifier', 'adaboost_classifier', 'gradient_boosting_classifier',
+        'xgboost_classifier', 'extra_trees_classifier', 'stacking_classifier'
+    ],
+    x_train: Any,
+    y_train: Any,
+    plot: bool = False,
+    **kwargs: Any
+) -> Union[
+    LogisticRegression, GaussianNB, MultinomialNB, BernoulliNB, KNeighborsClassifier, SVC,
+    DecisionTreeClassifier, RandomForestClassifier, BaggingClassifier, AdaBoostClassifier,
+    GradientBoostingClassifier, XGBClassifier, ExtraTreesClassifier, StackingClassifier
+]:
     """
     Get and train a classifier model with specified parameters.
 
     Parameters:
-        model_name (str): The name of the classifier model to instantiate. Supported models:
-            - logistic_regression
-            - naive_bayes
-            - kneighbors_classifier
-            - svc
-            - decision_tree_classifier
-            - random_forest_classifier
-            - bagging_classifier
-            - adaboost_classifier
-            - gradient_boosting_classifier
-            - xgboost_classifier
-            - stacking_classifier
+        model_name (Literal): The name of the classifier model to instantiate. Supported models:
+            - 'logistic_regression'
+            - 'gaussian_nb'
+            - 'multinomial_nb'
+            - 'bernoulli_nb'
+            - 'kneighbors_classifier'
+            - 'svc'
+            - 'decision_tree_classifier'
+            - 'random_forest_classifier'
+            - 'bagging_classifier'
+            - 'adaboost_classifier'
+            - 'gradient_boosting_classifier'
+            - 'lgbm_classifier'
+            - 'xgboost_classifier'
+            - 'extra_trees_classifier'
+            - 'stacking_classifier'
         x_train (Any): Training data features.
         y_train (Any): Training data labels.
         plot (bool): If True, plot the feature importances or coefficients.
@@ -3061,7 +3635,9 @@ def get_classifier(model_name: str, x_train: Any, y_train: Any, plot: bool = Fal
     """
     model_dict = {
         'logistic_regression': LogisticRegression,
-        'naive_bayes': GaussianNB,
+        'gaussian_nb': GaussianNB,
+        'multinomial_nb': MultinomialNB,
+        'bernoulli_nb': BernoulliNB,
         'kneighbors_classifier': KNeighborsClassifier,
         'svc': SVC,
         'decision_tree_classifier': DecisionTreeClassifier,
@@ -3070,6 +3646,7 @@ def get_classifier(model_name: str, x_train: Any, y_train: Any, plot: bool = Fal
         'adaboost_classifier': AdaBoostClassifier,
         'gradient_boosting_classifier': GradientBoostingClassifier,
         'xgboost_classifier': XGBClassifier,
+        'extra_trees_classifier': ExtraTreesClassifier,
         'stacking_classifier': StackingClassifier,
     }
     
@@ -3080,76 +3657,36 @@ def get_classifier(model_name: str, x_train: Any, y_train: Any, plot: bool = Fal
     model.fit(x_train, y_train)
 
     if plot:
-        plot_feature_importance_Classification(model, x_train, title='Top 10 Feature Importances', palette='magma', top_n=10, orientation='horizontal')
+        plot_feature_importance(model, x_train, title='Top 10 Feature Importances', palette='magma', top_n='first')
 
     return model
 
-def plot_feature_importance_Classification(
-    model: Any, 
-    x_train: Any, 
-    title: str = 'Feature Importances', 
-    palette: str = 'viridis', 
-    top_n: Optional[int] = None,
-    orientation: str = 'vertical'
-) -> None:
-    """
-    Plot feature importances for tree-based models or coefficients for linear models.
 
-    Parameters:
-        model (Any): The trained model.
-        x_train (Any): Training data features.
-        title (str): Title of the plot.
-        palette (str): Color palette for the plot.
-        top_n (Optional[int]): If specified, only the top_n most important features will be displayed.
-        orientation (str): Orientation of the plot ('vertical' or 'horizontal').
-    """
-    try:
-        if hasattr(model, 'feature_importances_'):
-            importances = model.feature_importances_
-            feature_names = x_train.columns if hasattr(x_train, 'columns') else np.arange(x_train.shape[1])
-        elif hasattr(model, 'coef_'):
-            importances = model.coef_[0]
-            feature_names = x_train.columns if hasattr(x_train, 'columns') else np.arange(x_train.shape[1])
-        else:
-            print("Model does not have feature importances or coefficients.")
-            return
-
-        # If top_n is specified, select the top_n features
-        if top_n is not None:
-            indices = np.argsort(importances)[-top_n:]
-            importances = importances[indices]
-            feature_names = feature_names[indices]
-
-        # Create the plot
-        sns.set(style="whitegrid")
-        if orientation == 'vertical':
-            sns.barplot(x=importances, y=feature_names, palette=palette)
-            plt.xlabel('Importance')
-            plt.ylabel('Feature')
-            plt.xticks(rotation=45)
-        else:
-            sns.barplot(x=feature_names, y=importances, palette=palette)
-            plt.xlabel('Feature')
-            plt.ylabel('Importance')
-            plt.xticks(rotation=45)
-
-        plt.title(title)
-        plt.show()
-    except Exception as e:
-        print(f"An error occurred while plotting: {e}")
-
-def get_regressor(model_name: str, x_train: Any, y_train: Any, plot: bool = False, **kwargs: Any) -> Union[
-    LinearRegression, Ridge, Lasso, KNeighborsRegressor, SVR, 
-    DecisionTreeRegressor, RandomForestRegressor, BaggingRegressor, 
-    AdaBoostRegressor, GradientBoostingRegressor, XGBRegressor, StackingRegressor]:
+def get_regressor(
+    model_name: Literal[
+        'linear_regression', 'ridge_regression', 'lasso_regression', 'elasticnet_regression',
+        'kneighbors_regressor', 'svr', 'decision_tree_regressor', 'random_forest_regressor',
+        'bagging_regressor', 'adaboost_regressor', 'gradient_boosting_regressor',
+        'xgboost_regressor', 'extra_trees_regressor', 'stacking_regressor'
+    ],
+    x_train: Any,
+    y_train: Any,
+    plot: bool = False,
+    **kwargs: Any
+) -> Union[
+    LinearRegression, Ridge, Lasso, ElasticNet, KNeighborsRegressor, SVR, DecisionTreeRegressor,
+    RandomForestRegressor, BaggingRegressor, AdaBoostRegressor, GradientBoostingRegressor,
+    XGBRegressor, ExtraTreesRegressor, StackingRegressor
+]:
     """
     Get and train a regression model with specified parameters.
 
     Parameters:
-        model_name (str): The name of the regression model to instantiate. Supported models:
+        model_name (Literal): The name of the regression model to instantiate. Supported models:
             - 'linear_regression'
             - 'ridge_regression'
             - 'lasso_regression'
+            - 'elasticnet_regression'
             - 'kneighbors_regressor'
             - 'svr'
             - 'decision_tree_regressor'
@@ -3158,6 +3695,7 @@ def get_regressor(model_name: str, x_train: Any, y_train: Any, plot: bool = Fals
             - 'adaboost_regressor'
             - 'gradient_boosting_regressor'
             - 'xgboost_regressor'
+            - 'extra_trees_regressor'
             - 'stacking_regressor'
         x_train (Any): Training data features.
         y_train (Any): Training data labels.
@@ -3179,6 +3717,7 @@ def get_regressor(model_name: str, x_train: Any, y_train: Any, plot: bool = Fals
         'linear_regression': LinearRegression,
         'ridge_regression': Ridge,
         'lasso_regression': Lasso,
+        'elasticnet_regression': ElasticNet,
         'kneighbors_regressor': KNeighborsRegressor,
         'svr': SVR,
         'decision_tree_regressor': DecisionTreeRegressor,
@@ -3187,6 +3726,7 @@ def get_regressor(model_name: str, x_train: Any, y_train: Any, plot: bool = Fals
         'adaboost_regressor': AdaBoostRegressor,
         'gradient_boosting_regressor': GradientBoostingRegressor,
         'xgboost_regressor': XGBRegressor,
+        'extra_trees_regressor': ExtraTreesRegressor,
         'stacking_regressor': StackingRegressor,
     }
     
@@ -3197,72 +3737,10 @@ def get_regressor(model_name: str, x_train: Any, y_train: Any, plot: bool = Fals
     model.fit(x_train, y_train)
 
     if plot:
-        plot_feature_importance_Regression(model, x_train, title='Top 10 Feature Importances', palette='magma', top_n=10, orientation='horizontal')
+        plot_feature_importance(model, x_train, title='Top 10 Feature Importances', palette='magma', top_n='first')
 
     return model
 
-def plot_feature_importance_Regression(
-    model: Any, 
-    x_train: Any, 
-    title: str = 'Feature Importances', 
-    palette: str = 'viridis', 
-    top_n: Optional[int] = None,
-    orientation: str = 'vertical'
-) -> None:
-    """
-    Plot feature importances for tree-based models or coefficients for linear models.
-
-    Parameters:
-        model (Any): The trained model.
-        x_train (Any): Training data features.
-        title (str): Title of the plot.
-        palette (str): Color palette for the plot.
-        top_n (Optional[int]): If specified, only the top_n most important features will be displayed.
-        orientation (str): Orientation of the plot ('vertical' or 'horizontal').
-    """
-    try:
-        if hasattr(model, 'feature_importances_'):
-            importances = model.feature_importances_
-            feature_names = x_train.columns if hasattr(x_train, 'columns') else np.arange(x_train.shape[1])
-        elif hasattr(model, 'coef_'):
-            importances = model.coef_[0]
-            feature_names = x_train.columns if hasattr(x_train, 'columns') else np.arange(x_train.shape[1])
-        else:
-            print("Model does not have feature importances or coefficients.")
-            return
-
-        # If top_n is specified, select the top_n features
-        if top_n is not None:
-            indices = np.argsort(importances)[-top_n:]
-            importances = importances[indices]
-            feature_names = feature_names[indices]
-
-        # Create the plot
-        sns.set(style="whitegrid")
-        if orientation == 'vertical':
-            sns.barplot(x=importances, y=feature_names, palette=palette)
-            plt.xlabel('Importance')
-            plt.ylabel('Feature')
-            plt.xticks(rotation=45)
-        else:
-            sns.barplot(x=feature_names, y=importances, palette=palette)
-            plt.xlabel('Feature')
-            plt.ylabel('Importance')
-            plt.xticks(rotation=45)
-
-        plt.title(title)
-        plt.show()
-    except Exception as e:
-        print(f"An error occurred while plotting: {e}")
-
-def get_x_y(df,target:Optional[str] = None):
-    if target == None:
-        x=df.iloc[:,:-1]
-        y=df.iloc[:,-1]
-    else:
-        x=df.drop(target,axis=1)
-        y=df[target]
-    return x,y
 
 
 def Check_Overfitting_Classification(
@@ -3281,6 +3759,7 @@ def Check_Overfitting_Classification(
     LeavePOut_p: int = 2,
     RepeatedKFold_n_repeats: int = 10,
     random_state: int = 42,
+    n_jobs = -1,
     plot: bool = True
 ) -> Dict[str, Any]:
     """
@@ -3359,17 +3838,17 @@ def Check_Overfitting_Classification(
     else:
         raise ValueError("Invalid cv_type. Choose from 'KFold', 'StratifiedKFold', 'LeaveOneOut', 'LeavePOut', 'RepeatedKFold', 'TimeSeriesSplit'.")
     
-    cv_scores = cross_val_score(model, x, y, cv=type_cross_valid, scoring=cv_scoring)
+    cv_scores = cross_val_score(model, x, y, cv=type_cross_valid, scoring=cv_scoring, n_jobs=n_jobs)
     
     # Compute the learning curves
-    train_sizes, train_scores, valid_scores = learning_curve(model, x, y, cv=type_cross_valid, scoring=learning_curve_scoring, n_jobs=-1, random_state=random_state)
+    train_sizes, train_scores, valid_scores = learning_curve(model, x, y, cv=type_cross_valid, scoring=learning_curve_scoring, n_jobs=n_jobs, random_state=random_state)
     train_scores_mean = np.mean(train_scores, axis=1)
     valid_scores_mean = np.mean(valid_scores, axis=1)
     train_scores_std = np.std(train_scores, axis=1)
     valid_scores_std = np.std(valid_scores, axis=1)
     
     # # Compute the learning curves
-    # train_sizes_t, train_scores_t, valid_scores_t = learning_curve(model, x_train, y_train, cv=type_cross_valid, scoring=learning_curve_scoring, n_jobs=-1, random_state=random_state)
+    # train_sizes_t, train_scores_t, valid_scores_t = learning_curve(model, x_train, y_train, cv=type_cross_valid, scoring=learning_curve_scoring, n_jobs=n_jobs, random_state=random_state)
     # # Calculate the mean and standard deviation for training and validation scores
     # train_mean_t = np.mean(train_scores_t, axis=1)
     # train_std_t = np.std(train_scores_t, axis=1)
@@ -3486,6 +3965,7 @@ def Check_Overfitting_Regression(
     LeavePOut_p: int = 2,
     RepeatedKFold_n_repeats: int = 10,
     random_state: int = 42,
+    n_jobs = -1,
     plot: bool = True
 ) -> Dict[str, Any]:
     y_train_pred = model.predict(x_train)
@@ -3518,9 +3998,9 @@ def Check_Overfitting_Regression(
     else:
         raise ValueError("Invalid cv_type. Choose from 'KFold', 'StratifiedKFold', 'LeaveOneOut', 'LeavePOut', 'RepeatedKFold', 'TimeSeriesSplit'.")
 
-    cv_scores = cross_val_score(model, x, y, cv=type_cross_valid, scoring=cv_scoring)
+    cv_scores = cross_val_score(model, x, y, cv=type_cross_valid, scoring=cv_scoring, n_jobs=n_jobs)
 
-    train_sizes, train_scores, valid_scores = learning_curve(model, x, y, cv=type_cross_valid, scoring=learning_curve_scoring, n_jobs=-1, random_state=random_state)
+    train_sizes, train_scores, valid_scores = learning_curve(model, x, y, cv=type_cross_valid, scoring=learning_curve_scoring, n_jobs=n_jobs, random_state=random_state)
     
     if learning_curve_scoring in ['neg_mean_squared_error', 'neg_mean_absolute_error']:
         train_scores_mean = -np.mean(train_scores, axis=1)
@@ -3531,7 +4011,7 @@ def Check_Overfitting_Regression(
     
     
     # # Compute the learning curves
-    # train_sizes_t, train_scores_t, valid_scores_t = learning_curve(model, x_train, y_train, cv=type_cross_valid, scoring=learning_curve_scoring, n_jobs=-1, random_state=random_state)
+    # train_sizes_t, train_scores_t, valid_scores_t = learning_curve(model, x_train, y_train, cv=type_cross_valid, scoring=learning_curve_scoring, n_jobs=n_jobs, random_state=random_state)
     # # Calculate the mean and standard deviation for training and validation scores
     # if learning_curve_scoring in ['neg_mean_squared_error', 'neg_mean_absolute_error']:
     #     # Convert scores to positive
@@ -3679,6 +4159,8 @@ def evaluate_model_Classification(y_test, y_pred):
     precision = precision_score(y_test, y_pred)
     f1 = f1_score(y_test, y_pred)
     roc_auc = roc_auc_score(y_test, y_pred)
+    class_report = classification_report(y_test, y_pred)
+    
 
     # Print evaluation metrics
     print(f'Accuracy score = {accuracy:.4f}')
@@ -3686,6 +4168,9 @@ def evaluate_model_Classification(y_test, y_pred):
     print(f'Precision score = {precision:.4f}')
     print(f'F1 score = {f1:.4f}')
     print(f'ROC AUC score = {roc_auc:.4f}')
+    
+    print("\nClassification Report:")
+    print(f'\n{class_report}\n')
 
     # Calculate ROC curve
     fpr, tpr, thresholds = roc_curve(y_test, y_pred)
@@ -3703,6 +4188,8 @@ def evaluate_model_Classification(y_test, y_pred):
     plt.grid(True)
     plt.tight_layout()
     plt.show()
+    
+    return accuracy, recall, precision, f1, roc_auc
 
 def evaluate_model_regression(y_test, y_pred):
     """
@@ -3740,7 +4227,108 @@ def evaluate_model_regression(y_test, y_pred):
     plt.grid(True)
     plt.tight_layout()
     plt.show()
+    
+    return mae , mse, rmse, r2
 
 
 
+def plots_evaluate_models(
+    data, 
+    labels=None, 
+    categories=None,
+    have_overfitting=None,
+    colors=None,
+    title=None, 
+    xlabel=None, 
+    ylabel=None, 
+    palette='magma', 
+    width=0.75, 
+    edgecolor='black',
+    linewidth=1.5,
+    hatches: list = None,
+    hatch: bool = True,
+    order: bool = False,
+    figsize=(10, 8),
+    data_labels=True,
+    annote_num=1
 
+):
+    if xlabel is None:
+        xlabel = 'Category'
+    if ylabel is None:
+        ylabel = 'Values'
+    if title is None:
+        title = 'Multiple Bar Plots'
+    
+    if not isinstance(data, pd.DataFrame):
+        if isinstance(data[0], (list, np.ndarray)):
+            df = pd.DataFrame(data).T
+        else:
+            df = pd.DataFrame(data, columns=['Values'])
+    else:
+        df = data.copy()
+    
+    if labels:
+        df.columns = labels
+    
+    if categories:
+        df['Category'] = categories
+    else:
+        df['Category'] = [f'Category {i+1}' for i in range(len(df))]
+    
+    df_melted = df.melt(id_vars='Category', var_name='Dataset', value_name='Value')
+    
+    plt.figure(figsize=figsize)
+    
+    if hatch and not hatches:
+        hatches_list = random.sample(['X', 'oo', 'O|', '/', '+', '++', '--', '-\\', 'xx', '*-', '\\\\', '|*', '\\', 'OO', 'o', '**', 'o-', '*', '//', '||', '+o', '..', '/o', 'O.', '\\|', 'x*', '|', '-', None], len(df['Category'].unique()))
+    else:
+        hatches_list = hatches
+    
+    if order:
+        ordered_x = df_melted.groupby('Category')['Value'].sum().sort_values(ascending=False).index
+        ax = sns.barplot(data=df_melted, x='Category', y='Value', hue='Dataset', palette=colors if colors else palette, errorbar=None, order=ordered_x, width=width)
+    else:
+        ax = sns.barplot(data=df_melted, x='Category', y='Value', hue='Dataset', palette=colors if colors else palette, errorbar=None, width=width)
+    
+    for bar in ax.patches:
+        bar.set_edgecolor(edgecolor)
+        bar.set_linewidth(linewidth)
+    
+    if hatch and hatches_list:
+        for i, bar_group in enumerate(ax.patches):
+            hatch_pattern = hatches_list[i % len(hatches_list)]
+            bar_group.set_hatch(hatch_pattern)
+    
+    if data_labels:
+        num_categories = len(categories)
+        for i, p in enumerate(ax.patches):
+            if have_overfitting:
+                color_index = i // num_categories
+                if color_index < len(have_overfitting):
+                    if have_overfitting[color_index] < 0:
+                        color = 'red'
+                    elif have_overfitting[color_index] > 0:
+                        color = 'green'
+                    else:
+                        color = 'black'
+                else:
+                    color = 'black'
+            else:
+                color = 'black'
+            
+            ax.annotate(format(p.get_height(), f'.{annote_num}f'),
+                        (p.get_x() + p.get_width() / 2., p.get_height()),
+                        ha='center', va='center', 
+                        xytext=(0, 10), 
+                        textcoords='offset points',
+                        color=color)
+    
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.legend(loc='center right')
+    
+    plt.grid(True, linestyle='--', linewidth=0.6, alpha=0.4)
+    
+    plt.show()

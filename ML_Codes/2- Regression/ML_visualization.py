@@ -1137,6 +1137,7 @@ def multiple_bar_plots_seaborn(
     order: bool = False,
     figsize=(10, 8),
     data_labels=True,
+    annote_num = 1
 ):
     """
     Creates a customized bar plot with optional hatching and ordering using Seaborn.
@@ -1229,7 +1230,7 @@ def multiple_bar_plots_seaborn(
     # Adding data labels
     if data_labels:
         for p in ax.patches:
-            ax.annotate(format(p.get_height(), '.1f'),
+            ax.annotate(format(p.get_height(), f'.{annote_num}f'),
                         (p.get_x() + p.get_width() / 2., p.get_height()),
                         ha='center', va='center', 
                         xytext=(0, 10), 
@@ -1800,7 +1801,7 @@ def plot_histograms_matplotlib(df: pd.DataFrame, column: Optional[Union[str, Non
         print(f"An error occurred: {e}")
 
 
-def plot_single_histogram_seaborn(df, x=None, y=None,hue=None, palette: str = 'viridis',color=None, kde:bool=True,bins=20, edgecolor='black', alpha=0.8, multiple: Literal['layer', 'dodge', 'stack', 'fill']='layer', orientation='vertical',legend_title=None,title=None) -> None:
+def plot_single_histogram_seaborn(df, x=None, y=None,hue=None, palette: str = 'viridis',color=None, kde:bool=True,bins=20, edgecolor='black', alpha=0.8, multiple: Literal['layer', 'dodge', 'stack', 'fill']='layer', orientation='vertical',legend_title=None,title=None, show=True) -> None:
         """Plot a histogram for a single column."""
         df= pd.DataFrame(df)
         if color is None:
@@ -1812,7 +1813,8 @@ def plot_single_histogram_seaborn(df, x=None, y=None,hue=None, palette: str = 'v
         plt.legend(legend_title if legend_title else ['hist'],loc='best')
         plt.title(title if title else 'hist', size=20)
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.show()
+        if show:
+            plt.show()
 
 
 def plot_histograms_seaborn(df: pd.DataFrame, column: Optional[Union[str, None]] = None, save_plots: bool = False, palette: str = 'magma',
@@ -2259,18 +2261,18 @@ def count_plot(df: pd.DataFrame,
     return ax
 
 
-def count_plot_all_column(categorical_features, df, vision='h'):
-    plt.figure(figsize=(20, 60))
+def count_plot_all_column(categorical_features, df, vision='h', num_of_column = 3, palette='viridis'):
+    plt.figure(figsize=(25, 60))
     plotnumber = 1
     if vision == 'h':
         for categorical_feature in categorical_features:
-            ax = plt.subplot(12, 3, plotnumber)
-            count_plot(y=categorical_feature, df=df, ax=ax)
+            ax = plt.subplot(12, num_of_column, plotnumber)
+            count_plot(y=categorical_feature, palette=palette, df=df, ax=ax)
             plotnumber += 1
     elif vision == 'x' or vision == 'v':
         for categorical_feature in categorical_features:
-            ax = plt.subplot(12, 3, plotnumber)
-            count_plot(x=categorical_feature, df=df, ax=ax)
+            ax = plt.subplot(12, num_of_column, plotnumber)
+            count_plot(x=categorical_feature, palette=palette, df=df, ax=ax)
             plt.xticks(rotation=45)
             plotnumber += 1
     plt.tight_layout()
