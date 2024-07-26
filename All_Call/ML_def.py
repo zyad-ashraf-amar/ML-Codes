@@ -86,7 +86,7 @@ from sklearn.feature_selection import (
     mutual_info_classif, 
     mutual_info_regression
 )
-from sklearn.naive_bayes import GaussianNB
+from sklearn.naive_bayes import BernoulliNB, GaussianNB, MultinomialNB
 from sklearn.neighbors import (
     KNeighborsClassifier,
     KNeighborsRegressor,
@@ -101,6 +101,8 @@ from sklearn.tree import (
     DecisionTreeRegressor
 )
 from sklearn.ensemble import (
+    ExtraTreesClassifier,
+    ExtraTreesRegressor,
     RandomForestClassifier,
     BaggingClassifier,
     AdaBoostClassifier,
@@ -112,6 +114,7 @@ from sklearn.ensemble import (
     GradientBoostingRegressor,
     StackingRegressor
 )
+import lightgbm as lgb
 from xgboost import XGBClassifier, XGBRegressor
 from sklearn.metrics import (
     accuracy_score,
@@ -2056,13 +2059,22 @@ def get_cross_validator(cv_type: Literal['KFold', 'StratifiedKFold', 'LeaveOneOu
     return type_cross_valid
 
 
-def grid_search_classifier(model_name: str, x_train: np.ndarray, y_train: np.ndarray, scoring: str = 'recall', cv=5, ensemble_estimators: Optional[List[Tuple[str, object]]] = None) -> Tuple[dict, float, object]:
+def grid_search_classifier(
+        model_name: Literal['LogisticRegression', 'GaussianNB', 'MultinomialNB', 'BernoulliNB', 'KNN', 'SVM', 
+                            'DecisionTree', 'RandomForest', 'GradientBoosting', 'LightGBM', 'XGBoost', 
+                            'ExtraTrees', 'Bagging', 'AdaBoost', 'Stacking'],
+        x_train: np.ndarray,
+        y_train: np.ndarray,
+        scoring: Literal['accuracy', 'precision', 'recall', 'f1'] = 'recall',
+        perfect_params: bool = False,
+        cv: int = 5,
+        ensemble_estimators: Optional[List[Tuple[str, object]]] = None
+    ) -> Tuple[dict, float, object]:
     """
     Perform grid search on a specified classification model to find the best hyperparameters.
 
     Parameters:
     model_name (str): The name of the classification model to use.
-                    ['LogisticRegression', 'NaiveBayes', 'KNN', 'SVM', 'DecisionTree', 'RandomForest', 'BaggingClassifier', 'AdaBoostClassifier', 'GradientBoostingClassifier', 'XGBoost', 'StackingClassifier']
     x_train (np.ndarray): The training input samples.
     y_train (np.ndarray): The target values (class labels) as integers or strings.
     scoring (str): The scoring metric to evaluate the models. Default is 'recall'.
@@ -2071,14 +2083,14 @@ def grid_search_classifier(model_name: str, x_train: np.ndarray, y_train: np.nda
     Returns:
     Tuple[dict, float, object]: The best hyperparameters found by grid search, the best cross-validation score achieved, and the best estimator found by grid search.
     """
+    
     if ensemble_estimators is None:
         ensemble_estimators = [
-                ('rf', RandomForestClassifier(n_jobs=-1)),
-                ('gb', GradientBoostingClassifier()),
-                ('xgb', XGBClassifier())
-            ]
+            ('rf', RandomForestClassifier(n_jobs=-1)),
+            ('gb', GradientBoostingClassifier()),
+            ('xgb', XGBClassifier())
+        ]
     
-    # Dictionary mapping model names to models and their hyperparameter grids
     model_params = {
         'LogisticRegression': {
             'model': LogisticRegression(),
@@ -2087,9 +2099,22 @@ def grid_search_classifier(model_name: str, x_train: np.ndarray, y_train: np.nda
                 'solver': ['liblinear', 'lbfgs']
             }
         },
-        'NaiveBayes': {
+        'GaussianNB': {
             'model': GaussianNB(),
             'params': {}
+        },
+        'MultinomialNB': {
+            'model': MultinomialNB(),
+            'params': {
+                'alpha': [0.01, 0.1, 1, 10, 100]
+            }
+        },
+        'BernoulliNB': {
+            'model': BernoulliNB(),
+            'params': {
+                'alpha': [0.01, 0.1, 1, 10, 100],
+                'binarize': [0.0, 0.5, 1.0]
+            }
         },
         'KNN': {
             'model': KNeighborsClassifier(),
@@ -2119,27 +2144,21 @@ def grid_search_classifier(model_name: str, x_train: np.ndarray, y_train: np.nda
                 'max_depth': [None, 5, 10, 20, 30]
             }
         },
-        'BaggingClassifier': {
-            'model': BaggingClassifier(n_jobs=-1),
-            'params': {
-                'n_estimators': [10, 50, 100, 200],
-                'max_samples': [0.5, 1.0],
-                'max_features': [0.5, 1.0]
-            }
-        },
-        'AdaBoostClassifier': {
-            'model': AdaBoostClassifier(),
-            'params': {
-                'n_estimators': [10, 50, 100, 200],
-                'learning_rate': [0.01, 0.1, 0.5, 1, 10]
-            }
-        },
-        'GradientBoostingClassifier': {
+        'GradientBoosting': {
             'model': GradientBoostingClassifier(),
             'params': {
                 'n_estimators': [10, 50, 100, 200],
                 'learning_rate': [0.01, 0.1, 0.2, 0.5],
                 'max_depth': [3, 5, 7]
+            }
+        },
+        'LightGBM': {
+            'model': lgb.LGBMClassifier(),
+            'params': {
+                'learning_rate': [0.01, 0.1, 0.2],
+                'n_estimators': [100, 200, 300],
+                'num_leaves': [31, 50, 100],
+                'boosting_type': ['gbdt', 'dart']
             }
         },
         'XGBoost': {
@@ -2150,7 +2169,32 @@ def grid_search_classifier(model_name: str, x_train: np.ndarray, y_train: np.nda
                 'max_depth': [3, 5, 7]
             }
         },
-        'StackingClassifier': {
+        'ExtraTrees': {
+            'model': ExtraTreesClassifier(n_jobs=-1),
+            'params': {
+                'n_estimators': [100, 200, 300],
+                'max_depth': [None, 5, 10, 20, 30],
+                'min_samples_split': [2, 5, 10],
+                'min_samples_leaf': [1, 2, 4],
+                'max_features': [None, 'auto', 'sqrt', 'log2']
+            }
+        },
+        'Bagging': {
+            'model': BaggingClassifier(n_jobs=-1),
+            'params': {
+                'n_estimators': [10, 50, 100, 200],
+                'max_samples': [0.5, 1.0],
+                'max_features': [0.5, 1.0]
+            }
+        },
+        'AdaBoost': {
+            'model': AdaBoostClassifier(),
+            'params': {
+                'n_estimators': [10, 50, 100, 200],
+                'learning_rate': [0.01, 0.1, 0.5, 1, 10]
+            }
+        },
+        'Stacking': {
             'model': StackingClassifier(n_jobs=-1, estimators=ensemble_estimators),
             'params': {
                 'final_estimator': [LogisticRegression(), RandomForestClassifier(), GradientBoostingClassifier()],
@@ -2159,118 +2203,151 @@ def grid_search_classifier(model_name: str, x_train: np.ndarray, y_train: np.nda
         }
     }
     
-    perfect_model_params = {
-        'LogisticRegression': {
-            'model': LogisticRegression(),
-            'params': {
-                'penalty': ['l1', 'l2', 'elasticnet', 'none'],
-                'C': [0.01, 0.1, 1, 10, 100],
-                'solver': ['liblinear', 'lbfgs', 'newton-cg', 'sag', 'saga'],
-                'max_iter': [100, 200, 300]
+    if perfect_params:
+        model_params.update({
+            'LogisticRegression': {
+                'model': LogisticRegression(),
+                'params': {
+                    'penalty': ['l1', 'l2', 'elasticnet', 'none'],
+                    'C': [0.01, 0.1, 1, 10, 100],
+                    'solver': ['liblinear', 'lbfgs', 'newton-cg', 'sag', 'saga'],
+                    'max_iter': [100, 200, 300]
+                }
+            },
+            'GaussianNB': {
+                'model': GaussianNB(),
+                'params': {
+                    'var_smoothing': [1e-09, 1e-08, 1e-07, 1e-06, 1e-05, 1e-04, 1e-03]
+                }
+            },
+            'MultinomialNB': {
+                'model': MultinomialNB(),
+                'params': {
+                    'alpha': [0.01, 0.1, 1, 10, 100]
+                }
+            },
+            'BernoulliNB': {
+                'model': BernoulliNB(),
+                'params': {
+                    'alpha': [0.01, 0.1, 1, 10, 100],
+                    'binarize': [0.0, 0.5, 1.0]
+                }
+            },
+            'KNN': {
+                'model': KNeighborsClassifier(),
+                'params': {
+                    'n_neighbors': [3, 5, 7, 9, 11],
+                    'weights': ['uniform', 'distance'],
+                    'algorithm': ['auto', 'ball_tree', 'kd_tree', 'brute'],
+                    'p': [1, 2]
+                }
+            },
+            'SVM': {
+                'model': SVC(),
+                'params': {
+                    'C': [0.1, 1, 10, 100],
+                    'kernel': ['linear', 'poly', 'rbf', 'sigmoid'],
+                    'gamma': ['scale', 'auto'],
+                    'degree': [2, 3, 4],
+                    'probability': [True, False]
+                }
+            },
+            'DecisionTree': {
+                'model': DecisionTreeClassifier(),
+                'params': {
+                    'criterion': ['gini', 'entropy'],
+                    'splitter': ['best', 'random'],
+                    'max_depth': [None, 5, 10, 20, 30],
+                    'min_samples_split': [2, 5, 10],
+                    'min_samples_leaf': [1, 2, 4],
+                    'max_features': [None, 'auto', 'sqrt', 'log2']
+                }
+            },
+            'RandomForest': {
+                'model': RandomForestClassifier(n_jobs=-1),
+                'params': {
+                    'n_estimators': [100, 200, 300],
+                    'criterion': ['gini', 'entropy'],
+                    'max_depth': [None, 5, 10, 20, 30],
+                    'min_samples_split': [2, 5, 10],
+                    'min_samples_leaf': [1, 2, 4],
+                    'max_features': [None, 'auto', 'sqrt', 'log2'],
+                    'bootstrap': [True, False]
+                }
+            },
+            'Bagging': {
+                'model': BaggingClassifier(n_jobs=-1),
+                'params': {
+                    'n_estimators': [10, 50, 100, 200],
+                    'max_samples': [0.5, 0.7, 1.0],
+                    'max_features': [0.5, 0.7, 1.0],
+                    'bootstrap': [True, False],
+                    'bootstrap_features': [True, False]
+                }
+            },
+            'AdaBoost': {
+                'model': AdaBoostClassifier(),
+                'params': {
+                    'n_estimators': [50, 100, 200, 300],
+                    'learning_rate': [0.01, 0.1, 0.5, 1, 10],
+                    'algorithm': ['SAMME', 'SAMME.R']
+                }
+            },
+            'GradientBoosting': {
+                'model': GradientBoostingClassifier(),
+                'params': {
+                    'loss': ['deviance', 'exponential'],
+                    'learning_rate': [0.01, 0.1, 0.2, 0.5],
+                    'n_estimators': [100, 200, 300],
+                    'max_depth': [3, 5, 7],
+                    'min_samples_split': [2, 5, 10],
+                    'min_samples_leaf': [1, 2, 4],
+                    'max_features': [None, 'auto', 'sqrt', 'log2']
+                }
+            },
+            'LightGBM': {
+                'model': lgb.LGBMClassifier(),
+                'params': {
+                    'learning_rate': [0.01, 0.1, 0.2],
+                    'n_estimators': [100, 200, 300],
+                    'num_leaves': [31, 50, 100],
+                    'boosting_type': ['gbdt', 'dart']
+                }
+            },
+            'XGBoost': {
+                'model': XGBClassifier(),
+                'params': {
+                    'learning_rate': [0.01, 0.1, 0.2, 0.3],
+                    'n_estimators': [100, 200, 300],
+                    'max_depth': [3, 5, 7],
+                    'min_child_weight': [1, 3, 5],
+                    'gamma': [0, 0.1, 0.2],
+                    'subsample': [0.7, 0.8, 1.0],
+                    'colsample_bytree': [0.7, 0.8, 1.0],
+                    'reg_alpha': [0, 0.1, 0.5],
+                    'reg_lambda': [1, 1.5, 2]
+                }
+            },
+            'ExtraTrees': {
+                'model': ExtraTreesClassifier(n_jobs=-1),
+                'params': {
+                    'n_estimators': [100, 200, 300],
+                    'max_depth': [None, 5, 10, 20, 30],
+                    'min_samples_split': [2, 5, 10],
+                    'min_samples_leaf': [1, 2, 4],
+                    'max_features': [None, 'auto', 'sqrt', 'log2']
+                }
+            },
+            'Stacking': {
+                'model': StackingClassifier(n_jobs=-1, estimators=ensemble_estimators),
+                'params': {
+                    'final_estimator': [LogisticRegression(), RandomForestClassifier(), GradientBoostingClassifier()],
+                    'cv': [5, 10],
+                    'stack_method': ['auto', 'predict_proba', 'decision_function', 'predict']
+                }
             }
-        },
-        'NaiveBayes': {
-            'model': GaussianNB(),
-            'params': {
-                'var_smoothing': [1e-09, 1e-08, 1e-07, 1e-06, 1e-05, 1e-04, 1e-03]
-            }
-        },
-        'KNN': {
-            'model': KNeighborsClassifier(),
-            'params': {
-                'n_neighbors': [3, 5, 7, 9, 11],
-                'weights': ['uniform', 'distance'],
-                'algorithm': ['auto', 'ball_tree', 'kd_tree', 'brute'],
-                'p': [1, 2]
-            }
-        },
-        'SVM': {
-            'model': SVC(),
-            'params': {
-                'C': [0.1, 1, 10, 100],
-                'kernel': ['linear', 'poly', 'rbf', 'sigmoid'],
-                'gamma': ['scale', 'auto'],
-                'degree': [2, 3, 4],
-                'probability': [True, False]
-            }
-        },
-        'DecisionTree': {
-            'model': DecisionTreeClassifier(),
-            'params': {
-                'criterion': ['gini', 'entropy'],
-                'splitter': ['best', 'random'],
-                'max_depth': [None, 5, 10, 20, 30],
-                'min_samples_split': [2, 5, 10],
-                'min_samples_leaf': [1, 2, 4],
-                'max_features': [None, 'auto', 'sqrt', 'log2']
-            }
-        },
-        'RandomForest': {
-            'model': RandomForestClassifier(n_jobs=-1),
-            'params': {
-                'n_estimators': [100, 200, 300],
-                'criterion': ['gini', 'entropy'],
-                'max_depth': [None, 5, 10, 20, 30],
-                'min_samples_split': [2, 5, 10],
-                'min_samples_leaf': [1, 2, 4],
-                'max_features': [None, 'auto', 'sqrt', 'log2'],
-                'bootstrap': [True, False]
-            }
-        },
-        'BaggingClassifier': {
-            'model': BaggingClassifier(n_jobs=-1),
-            'params': {
-                'n_estimators': [10, 50, 100, 200],
-                'max_samples': [0.5, 0.7, 1.0],
-                'max_features': [0.5, 0.7, 1.0],
-                'bootstrap': [True, False],
-                'bootstrap_features': [True, False]
-            }
-        },
-        'AdaBoostClassifier': {
-            'model': AdaBoostClassifier(),
-            'params': {
-                'n_estimators': [50, 100, 200, 300],
-                'learning_rate': [0.01, 0.1, 0.5, 1, 10],
-                'algorithm': ['SAMME', 'SAMME.R']
-            }
-        },
-        'GradientBoostingClassifier': {
-            'model': GradientBoostingClassifier(),
-            'params': {
-                'loss': ['deviance', 'exponential'],
-                'learning_rate': [0.01, 0.1, 0.2, 0.5],
-                'n_estimators': [100, 200, 300],
-                'max_depth': [3, 5, 7],
-                'min_samples_split': [2, 5, 10],
-                'min_samples_leaf': [1, 2, 4],
-                'max_features': [None, 'auto', 'sqrt', 'log2']
-            }
-        },
-        'XGBoost': {
-            'model': XGBClassifier(),
-            'params': {
-                'learning_rate': [0.01, 0.1, 0.2, 0.3],
-                'n_estimators': [100, 200, 300],
-                'max_depth': [3, 5, 7],
-                'min_child_weight': [1, 3, 5],
-                'gamma': [0, 0.1, 0.2],
-                'subsample': [0.7, 0.8, 1.0],
-                'colsample_bytree': [0.7, 0.8, 1.0],
-                'reg_alpha': [0, 0.1, 0.5],
-                'reg_lambda': [1, 1.5, 2]
-            }
-        },
-        'StackingClassifier': {
-            'model': StackingClassifier(n_jobs=-1, estimators= ensemble_estimators),
-            'params': {
-                'final_estimator': [LogisticRegression(), RandomForestClassifier(), GradientBoostingClassifier()],
-                'cv': [5, 10],
-                'stack_method': ['auto', 'predict_proba', 'decision_function', 'predict']
-            }
-        }
-    }
-    
+        })
+
     if model_name not in model_params:
         raise ValueError(f"Model {model_name} not recognized. Available models: {list(model_params.keys())}")
     
@@ -2293,233 +2370,284 @@ def grid_search_classifier(model_name: str, x_train: np.ndarray, y_train: np.nda
 
 
 
-def grid_search_regressor(model_name: str, x_train: np.ndarray, y_train: np.ndarray, scoring: str = 'neg_mean_squared_error', cv=5, ensemble_estimators: Optional[List[Tuple[str, object]]] = None) -> Tuple[Dict[str, Union[int, float, str]], float, object]:
+def grid_search_regressor(
+        model_name: Literal['LinearRegression', 'Ridge', 'Lasso', 'ElasticNet', 'KNN', 'SVR', 
+                            'DecisionTree', 'RandomForest', 'GradientBoosting', 'XGBoost', 
+                            'ExtraTrees', 'Bagging', 'AdaBoost', 'Stacking'],
+        x_train: np.ndarray,
+        y_train: np.ndarray,
+        scoring: Literal['neg_mean_squared_error', 'neg_mean_absolute_error', 'r2'] = 'neg_mean_squared_error',
+        perfect_params: bool = False,
+        cv: int = 5,
+        ensemble_estimators: Optional[List[Tuple[str, object]]] = None
+    ) -> Tuple[Dict[str, Union[int, float, str]], float, object]:
     """
     Perform grid search on a specified regression model to find the best hyperparameters.
 
     Parameters:
     model_name (str): The name of the regression model to use.
-                    ['LinearRegression', 'Ridge', 'Lasso', 'KNeighborsRegressor', 'SVR', 'DecisionTreeRegressor', 'RandomForestRegressor', 'BaggingRegressor', 'AdaBoostRegressor', 'GradientBoostingRegressor', 'XGBoost', 'StackingRegressor']
     x_train (np.ndarray): The training input samples.
     y_train (np.ndarray): The target values (regression output).
     scoring (str): The scoring metric to evaluate the models. Default is 'neg_mean_squared_error'.
-    ensemble_estimators (Optional[List[Tuple[str, object]]]): List of estimators for ensemble methods (Bagging, Stacking).
+    perfect_params (bool): Whether to use complex parameter grids. Default is False.
+    cv (int): Number of cross-validation folds. Default is 5.
+    ensemble_estimators (Optional[List[Tuple[str, object]]]): List of estimators for ensemble methods (Bagging, Stacking). Default is None.
 
     Returns:
-    Tuple[Dict[str, Union[int, float, str]], float, object]: The best hyperparameters found by grid search, the best cross-validation score achieved, and the best estimator found by grid search.
+    Tuple[Dict[str, Union[int, float, str]], float, object]: The best hyperparameters found by grid search, 
+    the best cross-validation score achieved, and the best estimator found by grid search.
     """
+    
     if ensemble_estimators is None:
         ensemble_estimators = [
-                ('rf', RandomForestRegressor(n_jobs=-1)),
-                ('gb', GradientBoostingRegressor()),
-                ('xgb', XGBRegressor())
-            ]
-    # Dictionary mapping model names to models and their hyperparameter grids
-    model_params = {
-        'LinearRegression': {
-            'model': LinearRegression(),
-            'params': {}
-        },
-        'Ridge': {
-            'model': Ridge(),
-            'params': {
-                'alpha': [0.01, 0.1, 1, 10, 100]
-            }
-        },
-        'Lasso': {
-            'model': Lasso(),
-            'params': {
-                'alpha': [0.01, 0.1, 1, 10, 100]
-            }
-        },
-        'KNeighborsRegressor': {
-            'model': KNeighborsRegressor(),
-            'params': {
-                'n_neighbors': [3, 5, 7, 9],
-                'weights': ['uniform', 'distance']
-            }
-        },
-        'SVR': {
-            'model': SVR(),
-            'params': {
-                'C': [0.1, 1, 10, 100],
-                'kernel': ['linear', 'rbf']
-            }
-        },
-        'DecisionTreeRegressor': {
-            'model': DecisionTreeRegressor(),
-            'params': {
-                'max_depth': [None, 5, 10, 20, 30],
-                'min_samples_split': [2, 5, 10]
-            }
-        },
-        'RandomForestRegressor': {
-            'model': RandomForestRegressor(),
-            'params': {
-                'n_estimators': [100, 200, 300],
-                'max_depth': [None, 5, 10, 20, 30]
-            }
-        },
-        'BaggingRegressor': {
-            'model': BaggingRegressor(),
-            'params': {
-                'n_estimators': [10, 50, 100],
-                'max_samples': [0.5, 1.0],
-                'max_features': [0.5, 1.0]
-            }
-        },
-        'AdaBoostRegressor': {
-            'model': AdaBoostRegressor(),
-            'params': {
-                'n_estimators': [10, 50, 100],
-                'learning_rate': [0.01, 0.1, 1, 10]
-            }
-        },
-        'GradientBoostingRegressor': {
-            'model': GradientBoostingRegressor(),
-            'params': {
-                'n_estimators': [10, 50, 100],
-                'learning_rate': [0.01, 0.1, 0.2],
-                'max_depth': [3, 5, 7]
-            }
-        },
-        'XGBoost': {
-            'model': XGBRegressor(),
-            'params': {
-                'n_estimators': [10, 50, 100],
-                'learning_rate': [0.01, 0.1, 0.2],
-                'max_depth': [3, 5, 7]
-            }
-        },
-        'StackingRegressor': {
-            'model': StackingRegressor(estimators=ensemble_estimators),
-            'params': {
-                'final_estimator': [LinearRegression(), Ridge(), GradientBoostingRegressor()],
-                'cv': [5, 10]
-            }
-        }
-    }
+            ('rf', RandomForestRegressor(n_jobs=-1)),
+            ('gb', GradientBoostingRegressor()),
+            ('xgb', XGBRegressor())
+        ]
     
-    perfect_model_params = {
-        'LinearRegression': {
-            'model': LinearRegression(),
-            'params': {
-                'fit_intercept': [True, False],
-                'normalize': [True, False]
-            }
-        },
-        'Ridge': {
-            'model': Ridge(),
-            'params': {
-                'alpha': [0.01, 0.1, 1, 10, 100],
-                'fit_intercept': [True, False],
-                'normalize': [True, False],
-                'solver': ['auto', 'svd', 'cholesky', 'lsqr', 'sag', 'saga']
-            }
-        },
-        'Lasso': {
-            'model': Lasso(),
-            'params': {
-                'alpha': [0.01, 0.1, 1, 10, 100],
-                'fit_intercept': [True, False],
-                'normalize': [True, False],
-                'max_iter': [1000, 2000, 3000]
-            }
-        },
-        'KNeighborsRegressor': {
-            'model': KNeighborsRegressor(),
-            'params': {
-                'n_neighbors': [3, 5, 7, 9],
-                'weights': ['uniform', 'distance'],
-                'algorithm': ['auto', 'ball_tree', 'kd_tree', 'brute'],
-                'p': [1, 2]
-            }
-        },
-        'SVR': {
-            'model': SVR(),
-            'params': {
-                'C': [0.1, 1, 10, 100],
-                'kernel': ['linear', 'poly', 'rbf', 'sigmoid'],
-                'degree': [2, 3, 4],
-                'gamma': ['scale', 'auto'],
-                'epsilon': [0.1, 0.2, 0.5]
-            }
-        },
-        'DecisionTreeRegressor': {
-            'model': DecisionTreeRegressor(),
-            'params': {
-                'criterion': ['mse', 'friedman_mse', 'mae'],
-                'splitter': ['best', 'random'],
-                'max_depth': [None, 5, 10, 20, 30],
-                'min_samples_split': [2, 5, 10],
-                'min_samples_leaf': [1, 2, 4],
-                'max_features': [None, 'auto', 'sqrt', 'log2']
-            }
-        },
-        'RandomForestRegressor': {
-            'model': RandomForestRegressor(n_jobs=-1),
-            'params': {
-                'n_estimators': [100, 200, 300],
-                'criterion': ['mse', 'mae'],
-                'max_depth': [None, 5, 10, 20, 30],
-                'min_samples_split': [2, 5, 10],
-                'min_samples_leaf': [1, 2, 4],
-                'max_features': [None, 'auto', 'sqrt', 'log2'],
-                'bootstrap': [True, False]
-            }
-        },
-        'BaggingRegressor': {
-            'model': BaggingRegressor(n_jobs=-1),
-            'params': {
-                'n_estimators': [10, 50, 100, 200],
-                'max_samples': [0.5, 0.7, 1.0],
-                'max_features': [0.5, 0.7, 1.0],
-                'bootstrap': [True, False],
-                'bootstrap_features': [True, False]
-            }
-        },
-        'AdaBoostRegressor': {
-            'model': AdaBoostRegressor(),
-            'params': {
-                'n_estimators': [50, 100, 200, 300],
-                'learning_rate': [0.01, 0.1, 0.5, 1, 10],
-                'loss': ['linear', 'square', 'exponential']
-            }
-        },
-        'GradientBoostingRegressor': {
-            'model': GradientBoostingRegressor(),
-            'params': {
-                'loss': ['ls', 'lad', 'huber', 'quantile'],
-                'learning_rate': [0.01, 0.1, 0.2, 0.5],
-                'n_estimators': [100, 200, 300],
-                'max_depth': [3, 5, 7],
-                'min_samples_split': [2, 5, 10],
-                'min_samples_leaf': [1, 2, 4],
-                'max_features': [None, 'auto', 'sqrt', 'log2']
-            }
-        },
-        'XGBoost': {
-            'model': XGBRegressor(),
-            'params': {
-                'learning_rate': [0.01, 0.1, 0.2, 0.3],
-                'n_estimators': [100, 200, 300],
-                'max_depth': [3, 5, 7],
-                'min_child_weight': [1, 3, 5],
-                'gamma': [0, 0.1, 0.2],
-                'subsample': [0.7, 0.8, 1.0],
-                'colsample_bytree': [0.7, 0.8, 1.0],
-                'reg_alpha': [0, 0.1, 0.5],
-                'reg_lambda': [1, 1.5, 2]
-            }
-        },
-        'StackingRegressor': {
-            'model': StackingRegressor(estimators=ensemble_estimators),
-            'params': {
-                'final_estimator': [LinearRegression(), Ridge(), GradientBoostingRegressor()],
-                'cv': [5, 10]
+    if not perfect_params:
+        model_params = {
+            'LinearRegression': {
+                'model': LinearRegression(),
+                'params': {}
+            },
+            'Ridge': {
+                'model': Ridge(),
+                'params': {
+                    'alpha': [0.01, 0.1, 1, 10, 100]
+                }
+            },
+            'Lasso': {
+                'model': Lasso(),
+                'params': {
+                    'alpha': [0.01, 0.1, 1, 10, 100]
+                }
+            },
+            'ElasticNet': {
+                'model': ElasticNet(),
+                'params': {
+                    'alpha': [0.01, 0.1, 1, 10, 100],
+                    'l1_ratio': [0.1, 0.5, 0.9]
+                }
+            },
+            'KNN': {
+                'model': KNeighborsRegressor(),
+                'params': {
+                    'n_neighbors': [3, 5, 7, 9],
+                    'weights': ['uniform', 'distance']
+                }
+            },
+            'SVR': {
+                'model': SVR(),
+                'params': {
+                    'C': [0.1, 1, 10, 100],
+                    'kernel': ['linear', 'rbf']
+                }
+            },
+            'DecisionTree': {
+                'model': DecisionTreeRegressor(),
+                'params': {
+                    'max_depth': [None, 5, 10, 20, 30],
+                    'min_samples_split': [2, 5, 10]
+                }
+            },
+            'RandomForest': {
+                'model': RandomForestRegressor(),
+                'params': {
+                    'n_estimators': [100, 200, 300],
+                    'max_depth': [None, 5, 10, 20, 30]
+                }
+            },
+            'GradientBoosting': {
+                'model': GradientBoostingRegressor(),
+                'params': {
+                    'n_estimators': [10, 50, 100],
+                    'learning_rate': [0.01, 0.1, 0.2],
+                    'max_depth': [3, 5, 7]
+                }
+            },
+            'XGBoost': {
+                'model': XGBRegressor(),
+                'params': {
+                    'n_estimators': [10, 50, 100],
+                    'learning_rate': [0.01, 0.1, 0.2],
+                    'max_depth': [3, 5, 7]
+                }
+            },
+            'ExtraTrees': {
+                'model': ExtraTreesRegressor(n_jobs=-1),
+                'params': {
+                    'n_estimators': [100, 200, 300],
+                    'max_depth': [None, 5, 10, 20, 30],
+                    'min_samples_split': [2, 5, 10],
+                    'min_samples_leaf': [1, 2, 4],
+                    'max_features': [None, 'auto', 'sqrt', 'log2']
+                }
+            },
+            'Bagging': {
+                'model': BaggingRegressor(n_jobs=-1),
+                'params': {
+                    'n_estimators': [10, 50, 100],
+                    'max_samples': [0.5, 1.0],
+                    'max_features': [0.5, 1.0]
+                }
+            },
+            'AdaBoost': {
+                'model': AdaBoostRegressor(),
+                'params': {
+                    'n_estimators': [10, 50, 100],
+                    'learning_rate': [0.01, 0.1, 1, 10]
+                }
+            },
+            'Stacking': {
+                'model': StackingRegressor(estimators=ensemble_estimators),
+                'params': {
+                    'final_estimator': [LinearRegression(), Ridge(), GradientBoostingRegressor()],
+                    'cv': [5, 10]
+                }
             }
         }
-    }
+    else:
+        model_params = {
+            'LinearRegression': {
+                'model': LinearRegression(),
+                'params': {
+                    'fit_intercept': [True, False],
+                    'normalize': [True, False]
+                }
+            },
+            'Ridge': {
+                'model': Ridge(),
+                'params': {
+                    'alpha': [0.01, 0.1, 1, 10, 100],
+                    'fit_intercept': [True, False],
+                    'normalize': [True, False],
+                    'solver': ['auto', 'svd', 'cholesky', 'lsqr', 'sag', 'saga']
+                }
+            },
+            'Lasso': {
+                'model': Lasso(),
+                'params': {
+                    'alpha': [0.01, 0.1, 1, 10, 100],
+                    'fit_intercept': [True, False],
+                    'normalize': [True, False],
+                    'max_iter': [1000, 2000, 3000]
+                }
+            },
+            'ElasticNet': {
+                'model': ElasticNet(),
+                'params': {
+                    'alpha': [0.01, 0.1, 1, 10, 100],
+                    'l1_ratio': [0.1, 0.5, 0.9],
+                    'fit_intercept': [True, False],
+                    'normalize': [True, False],
+                    'max_iter': [1000, 2000, 3000]
+                }
+            },
+            'KNN': {
+                'model': KNeighborsRegressor(),
+                'params': {
+                    'n_neighbors': [3, 5, 7, 9, 11],
+                    'weights': ['uniform', 'distance'],
+                    'algorithm': ['auto', 'ball_tree', 'kd_tree', 'brute'],
+                    'p': [1, 2]
+                }
+            },
+            'SVR': {
+                'model': SVR(),
+                'params': {
+                    'C': [0.1, 1, 10, 100],
+                    'kernel': ['linear', 'poly', 'rbf', 'sigmoid'],
+                    'degree': [2, 3, 4],
+                    'gamma': ['scale', 'auto'],
+                    'epsilon': [0.1, 0.2, 0.5]
+                }
+            },
+            'DecisionTree': {
+                'model': DecisionTreeRegressor(),
+                'params': {
+                    'criterion': ['mse', 'friedman_mse', 'mae'],
+                    'splitter': ['best', 'random'],
+                    'max_depth': [None, 5, 10, 20, 30],
+                    'min_samples_split': [2, 5, 10],
+                    'min_samples_leaf': [1, 2, 4],
+                    'max_features': [None, 'auto', 'sqrt', 'log2']
+                }
+            },
+            'RandomForest': {
+                'model': RandomForestRegressor(n_jobs=-1),
+                'params': {
+                    'n_estimators': [100, 200, 300],
+                    'criterion': ['mse', 'mae'],
+                    'max_depth': [None, 5, 10, 20, 30],
+                    'min_samples_split': [2, 5, 10],
+                    'min_samples_leaf': [1, 2, 4],
+                    'max_features': [None, 'auto', 'sqrt', 'log2'],
+                    'bootstrap': [True, False]
+                }
+            },
+            'ExtraTrees': {
+                'model': ExtraTreesRegressor(n_jobs=-1),
+                'params': {
+                    'n_estimators': [100, 200, 300],
+                    'max_depth': [None, 5, 10, 20, 30],
+                    'min_samples_split': [2, 5, 10],
+                    'min_samples_leaf': [1, 2, 4],
+                    'max_features': [None, 'auto', 'sqrt', 'log2']
+                }
+            },
+            'Bagging': {
+                'model': BaggingRegressor(n_jobs=-1),
+                'params': {
+                    'n_estimators': [10, 50, 100, 200],
+                    'max_samples': [0.5, 0.7, 1.0],
+                    'max_features': [0.5, 0.7, 1.0],
+                    'bootstrap': [True, False],
+                    'bootstrap_features': [True, False]
+                }
+            },
+            'AdaBoost': {
+                'model': AdaBoostRegressor(),
+                'params': {
+                    'n_estimators': [50, 100, 200, 300],
+                    'learning_rate': [0.01, 0.1, 0.5, 1, 10],
+                    'loss': ['linear', 'square', 'exponential']
+                }
+            },
+            'GradientBoosting': {
+                'model': GradientBoostingRegressor(),
+                'params': {
+                    'loss': ['ls', 'lad', 'huber', 'quantile'],
+                    'learning_rate': [0.01, 0.1, 0.2, 0.5],
+                    'n_estimators': [100, 200, 300],
+                    'max_depth': [3, 5, 7],
+                    'min_samples_split': [2, 5, 10],
+                    'min_samples_leaf': [1, 2, 4],
+                    'max_features': [None, 'auto', 'sqrt', 'log2']
+                }
+            },
+            'XGBoost': {
+                'model': XGBRegressor(),
+                'params': {
+                    'learning_rate': [0.01, 0.1, 0.2, 0.3],
+                    'n_estimators': [100, 200, 300],
+                    'max_depth': [3, 5, 7],
+                    'min_child_weight': [1, 3, 5],
+                    'gamma': [0, 0.1, 0.2],
+                    'subsample': [0.7, 0.8, 1.0],
+                    'colsample_bytree': [0.7, 0.8, 1.0],
+                    'reg_alpha': [0, 0.1, 0.5],
+                    'reg_lambda': [1, 1.5, 2]
+                }
+            },
+            'Stacking': {
+                'model': StackingRegressor(estimators=ensemble_estimators),
+                'params': {
+                    'final_estimator': [LinearRegression(), Ridge(), GradientBoostingRegressor()],
+                    'cv': [5, 10]
+                }
+            }
+        }
     
     if model_name not in model_params:
         raise ValueError(f"Model {model_name} not recognized. Available models: {list(model_params.keys())}")
@@ -2541,31 +2669,46 @@ def grid_search_regressor(model_name: str, x_train: np.ndarray, y_train: np.ndar
     
     return best_params, best_score, best_estimator
 
-def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.ndarray, ensemble_estimators: Optional[List[Tuple[str, object]]] = None, scoring: str = 'recall', cv=5, n_iter: int = 100) -> Tuple[Dict[str, Union[int, float, str]], float, object]:
+
+
+def random_search_classifier(
+        model_name: Literal['LogisticRegression', 'GaussianNB', 'MultinomialNB', 'BernoulliNB', 'KNN', 'SVM', 
+                            'DecisionTree', 'RandomForest', 'GradientBoosting', 'LightGBM', 'XGBoost', 
+                            'ExtraTrees', 'Bagging', 'AdaBoost', 'Stacking'],
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        scoring: Literal['accuracy', 'precision', 'recall', 'f1'] = 'recall',
+        perfect_params: bool = False,
+        n_iter: int = 100,
+        cv: int = 5,
+        ensemble_estimators: Optional[List[Tuple[str, object]]] = None
+    ) -> Tuple[Dict[str, Union[int, float, str]], float, object]:
     """
     Perform random search on a specified classification model to find the best hyperparameters.
 
     Parameters:
     model_name (str): The name of the classification model to use.
-                    ['LogisticRegression', 'NaiveBayes', 'KNeighborsClassifier', 'SVC', 'DecisionTreeClassifier', 'RandomForestClassifier', 'BaggingClassifier', 'AdaBoostClassifier', 'GradientBoostingClassifier', 'XGBoost', 'StackingClassifier']
     X_train (np.ndarray): The training input samples.
     y_train (np.ndarray): The target values (class labels) as integers or strings.
-    ensemble_estimators (Optional[List[Tuple[str, object]]]): List of estimators for ensemble methods (Bagging, Stacking). Default is None.
     scoring (str): The scoring metric to evaluate the models. Default is 'recall'.
+    perfect_params (bool): Whether to use complex parameter grids. Default is False.
     n_iter (int): Number of parameter settings that are sampled. Default is 100.
+    cv (int): Number of cross-validation folds. Default is 5.
+    ensemble_estimators (Optional[List[Tuple[str, object]]]): List of estimators for ensemble methods (Bagging, Stacking). Default is None.
 
     Returns:
-    Tuple[Dict[str, Union[int, float, str]], float, object]: The best hyperparameters found by random search, the best cross-validation score achieved, and the best estimator found by random search.
+    Tuple[Dict[str, Union[int, float, str]], float, object]: The best hyperparameters found by random search, 
+    the best cross-validation score achieved, and the best estimator found by random search.
     """
+    
     if ensemble_estimators is None:
         ensemble_estimators = [
-                ('rf', RandomForestClassifier(n_jobs=-1)),
-                ('gb', GradientBoostingClassifier()),
-                ('xgb', XGBClassifier())
-            ]
+            ('rf', RandomForestClassifier(n_jobs=-1)),
+            ('gb', GradientBoostingClassifier()),
+            ('xgb', XGBClassifier())
+        ]
     
     def get_model_params() -> Dict[str, Dict[str, Union[object, Dict[str, Union[list, object]]]]]:
-        """Returns the dictionary mapping model names to models and their hyperparameter distributions."""
         return {
             'LogisticRegression': {
                 'model': LogisticRegression(),
@@ -2574,59 +2717,66 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'solver': ['liblinear', 'lbfgs']
                 }
             },
-            'NaiveBayes': {
+            'GaussianNB': {
                 'model': GaussianNB(),
                 'params': {}
             },
-            'KNeighborsClassifier': {
+            'MultinomialNB': {
+                'model': MultinomialNB(),
+                'params': {
+                    'alpha': uniform(0.01, 100)
+                }
+            },
+            'BernoulliNB': {
+                'model': BernoulliNB(),
+                'params': {
+                    'alpha': uniform(0.01, 100),
+                    'binarize': uniform(0.0, 1.0)
+                }
+            },
+            'KNN': {
                 'model': KNeighborsClassifier(),
                 'params': {
                     'n_neighbors': randint(3, 10),
                     'weights': ['uniform', 'distance']
                 }
             },
-            'SVC': {
+            'SVM': {
                 'model': SVC(),
                 'params': {
                     'C': uniform(0.1, 100),
                     'kernel': ['linear', 'rbf']
                 }
             },
-            'DecisionTreeClassifier': {
+            'DecisionTree': {
                 'model': DecisionTreeClassifier(),
                 'params': {
                     'max_depth': [None] + list(range(1, 31)),
                     'min_samples_split': randint(2, 11)
                 }
             },
-            'RandomForestClassifier': {
+            'RandomForest': {
                 'model': RandomForestClassifier(),
                 'params': {
                     'n_estimators': randint(10, 101),
                     'max_depth': [None] + list(range(10, 31))
                 }
             },
-            'BaggingClassifier': {
-                'model': BaggingClassifier(),
-                'params': {
-                    'n_estimators': randint(10, 101),
-                    'max_samples': uniform(0.5, 1.0),
-                    'max_features': uniform(0.5, 1.0)
-                }
-            },
-            'AdaBoostClassifier': {
-                'model': AdaBoostClassifier(),
-                'params': {
-                    'n_estimators': randint(10, 101),
-                    'learning_rate': uniform(0.01, 10)
-                }
-            },
-            'GradientBoostingClassifier': {
+            'GradientBoosting': {
                 'model': GradientBoostingClassifier(),
                 'params': {
                     'n_estimators': randint(10, 101),
                     'learning_rate': uniform(0.01, 0.2),
                     'max_depth': randint(3, 8)
+                }
+            },
+            'LightGBM': {
+                'model': lgb.LGBMClassifier(),
+                'params': {
+                    'learning_rate': uniform(0.01, 0.2),
+                    'n_estimators': randint(50, 200),
+                    'num_leaves': randint(31, 100),
+                    'boosting_type': ['gbdt', 'dart']
                 }
             },
             'XGBoost': {
@@ -2637,16 +2787,41 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'max_depth': randint(3, 8)
                 }
             },
-            'StackingClassifier': {
-                'model': StackingClassifier(estimators=ensemble_estimators),
+            'ExtraTrees': {
+                'model': ExtraTreesClassifier(n_jobs=-1),
+                'params': {
+                    'n_estimators': randint(10, 101),
+                    'max_depth': [None] + list(range(10, 31)),
+                    'min_samples_split': randint(2, 11),
+                    'min_samples_leaf': randint(1, 11),
+                    'max_features': [None, 'auto', 'sqrt', 'log2']
+                }
+            },
+            'Bagging': {
+                'model': BaggingClassifier(n_jobs=-1),
+                'params': {
+                    'n_estimators': randint(10, 101),
+                    'max_samples': uniform(0.5, 1.0),
+                    'max_features': uniform(0.5, 1.0)
+                }
+            },
+            'AdaBoost': {
+                'model': AdaBoostClassifier(),
+                'params': {
+                    'n_estimators': randint(10, 101),
+                    'learning_rate': uniform(0.01, 10)
+                }
+            },
+            'Stacking': {
+                'model': StackingClassifier(n_jobs=-1, estimators=ensemble_estimators),
                 'params': {
                     'final_estimator': [LogisticRegression(), RandomForestClassifier(), GradientBoostingClassifier()],
                     'cv': [5, 10]
                 }
             }
         }
+    
     def get_model_perfect_params() -> Dict[str, Dict[str, Union[object, Dict[str, Union[list, object]]]]]:
-        """Returns the dictionary mapping model names to models and their hyperparameter distributions."""
         return {
             'LogisticRegression': {
                 'model': LogisticRegression(),
@@ -2657,11 +2832,26 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'max_iter': randint(100, 500)
                 }
             },
-            'NaiveBayes': {
+            'GaussianNB': {
                 'model': GaussianNB(),
-                'params': {}
+                'params': {
+                    'var_smoothing': uniform(1e-09, 1e-03)
+                }
             },
-            'KNeighborsClassifier': {
+            'MultinomialNB': {
+                'model': MultinomialNB(),
+                'params': {
+                    'alpha': uniform(0.01, 100)
+                }
+            },
+            'BernoulliNB': {
+                'model': BernoulliNB(),
+                'params': {
+                    'alpha': uniform(0.01, 100),
+                    'binarize': uniform(0.0, 1.0)
+                }
+            },
+            'KNN': {
                 'model': KNeighborsClassifier(),
                 'params': {
                     'n_neighbors': randint(3, 50),
@@ -2670,7 +2860,7 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'leaf_size': randint(20, 50)
                 }
             },
-            'SVC': {
+            'SVM': {
                 'model': SVC(),
                 'params': {
                     'C': uniform(0.1, 100),
@@ -2680,7 +2870,7 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'coef0': uniform(0, 1)
                 }
             },
-            'DecisionTreeClassifier': {
+            'DecisionTree': {
                 'model': DecisionTreeClassifier(),
                 'params': {
                     'criterion': ['gini', 'entropy'],
@@ -2690,7 +2880,7 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'max_features': ['auto', 'sqrt', 'log2', None]
                 }
             },
-            'RandomForestClassifier': {
+            'RandomForest': {
                 'model': RandomForestClassifier(),
                 'params': {
                     'n_estimators': randint(50, 200),
@@ -2702,8 +2892,8 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'bootstrap': [True, False]
                 }
             },
-            'BaggingClassifier': {
-                'model': BaggingClassifier(),
+            'Bagging': {
+                'model': BaggingClassifier(n_jobs=-1),
                 'params': {
                     'n_estimators': randint(10, 200),
                     'max_samples': uniform(0.5, 1.0),
@@ -2712,7 +2902,7 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'bootstrap_features': [True, False]
                 }
             },
-            'AdaBoostClassifier': {
+            'AdaBoost': {
                 'model': AdaBoostClassifier(),
                 'params': {
                     'n_estimators': randint(50, 200),
@@ -2720,7 +2910,7 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'algorithm': ['SAMME', 'SAMME.R']
                 }
             },
-            'GradientBoostingClassifier': {
+            'GradientBoosting': {
                 'model': GradientBoostingClassifier(),
                 'params': {
                     'n_estimators': randint(50, 200),
@@ -2730,6 +2920,15 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'min_samples_leaf': randint(1, 20),
                     'max_features': ['auto', 'sqrt', 'log2', None],
                     'subsample': uniform(0.5, 1.0)
+                }
+            },
+            'LightGBM': {
+                'model': lgb.LGBMClassifier(),
+                'params': {
+                    'learning_rate': uniform(0.01, 0.2),
+                    'n_estimators': randint(50, 200),
+                    'num_leaves': randint(31, 100),
+                    'boosting_type': ['gbdt', 'dart']
                 }
             },
             'XGBoost': {
@@ -2746,16 +2945,27 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
                     'reg_lambda': uniform(0.5, 2)
                 }
             },
-            'StackingClassifier': {
-                'model': StackingClassifier(estimators=ensemble_estimators),
+            'ExtraTrees': {
+                'model': ExtraTreesClassifier(n_jobs=-1),
+                'params': {
+                    'n_estimators': randint(50, 200),
+                    'max_depth': [None] + list(range(10, 31)),
+                    'min_samples_split': randint(2, 20),
+                    'min_samples_leaf': randint(1, 20),
+                    'max_features': ['auto', 'sqrt', 'log2', None]
+                }
+            },
+            'Stacking': {
+                'model': StackingClassifier(n_jobs=-1, estimators=ensemble_estimators),
                 'params': {
                     'final_estimator': [LogisticRegression(), RandomForestClassifier(), GradientBoostingClassifier()],
-                    'cv': [5, 10]
+                    'cv': [5, 10],
+                    'stack_method': ['auto', 'predict_proba', 'decision_function', 'predict']
                 }
             }
         }
-    
-    model_params = get_model_params()
+
+    model_params = get_model_params() if not perfect_params else get_model_perfect_params()
     
     if model_name not in model_params:
         raise ValueError(f"Model {model_name} not recognized. Available models: {list(model_params.keys())}")
@@ -2777,31 +2987,28 @@ def random_search_classifier(model_name: str, X_train: np.ndarray, y_train: np.n
     
     return best_params, best_score, best_estimator
 
-def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.ndarray, ensemble_estimators: Optional[List[Tuple[str, object]]] = None, scoring: str = 'neg_mean_squared_error', cv=5, n_iter: int = 100) -> Tuple[Dict[str, Union[int, float, str]], float, object]:
-    """
-    Perform random search on a specified regression model to find the best hyperparameters.
 
-    Parameters:
-    model_name (str): The name of the regression model to use.
-                    ['LinearRegression', 'Ridge', 'Lasso', 'KNeighborsRegressor', 'SVR', 'DecisionTreeRegressor', 'RandomForestRegressor', 'BaggingRegressor', 'AdaBoostRegressor', 'GradientBoostingRegressor', 'XGBoost', 'StackingRegressor']
-    X_train (np.ndarray): The training input samples.
-    y_train (np.ndarray): The target values (regression output).
-    ensemble_estimators (Optional[List[Tuple[str, object]]]): List of estimators for ensemble methods (Bagging, Stacking). Default is None.
-    scoring (str): The scoring metric to evaluate the models. Default is 'neg_mean_squared_error'.
-    n_iter (int): Number of parameter settings that are sampled. Default is 100.
 
-    Returns:
-    Tuple[Dict[str, Union[int, float, str]], float, object]: The best hyperparameters found by random search, the best cross-validation score achieved, and the best estimator found by random search.
-    """
+def random_search_regressor(model_name: Literal['LinearRegression', 'Ridge', 'Lasso', 'ElasticNet', 'KNN', 'SVR', 
+                            'DecisionTree', 'RandomForest', 'GradientBoosting', 'XGBoost', 
+                            'ExtraTrees', 'Bagging', 'AdaBoost', 'Stacking'],
+                            X_train: np.ndarray, 
+                            y_train: np.ndarray, 
+                            scoring: Literal['neg_mean_squared_error', 'neg_mean_absolute_error', 'r2'] = 'neg_mean_squared_error',
+                            perfect_params: bool = False,
+                            n_iter: int = 100,
+                            cv=5, 
+                            ensemble_estimators: Optional[List[Tuple[str, object]]] = None, 
+) -> Tuple[Dict[str, Union[int, float, str]], float, object]:
+
     if ensemble_estimators is None:
         ensemble_estimators = [
-                ('rf', RandomForestRegressor(n_jobs=-1)),
-                ('gb', GradientBoostingRegressor()),
-                ('xgb', XGBRegressor())
-            ]
+            ('rf', RandomForestRegressor(n_jobs=-1)),
+            ('gb', GradientBoostingRegressor()),
+            ('xgb', XGBRegressor())
+        ]
     
     def get_model_params() -> Dict[str, Dict[str, Union[object, Dict[str, Union[list, object]]]]]:
-        """Returns the dictionary mapping model names to models and their hyperparameter distributions."""
         return {
             'LinearRegression': {
                 'model': LinearRegression(),
@@ -2819,7 +3026,14 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                     'alpha': uniform(0.01, 100)
                 }
             },
-            'KNeighborsRegressor': {
+            'ElasticNet': {
+                'model': ElasticNet(),
+                'params': {
+                    'alpha': uniform(0.01, 100),
+                    'l1_ratio': uniform(0, 1)
+                }
+            },
+            'KNN': {
                 'model': KNeighborsRegressor(),
                 'params': {
                     'n_neighbors': randint(3, 10),
@@ -2833,36 +3047,21 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                     'kernel': ['linear', 'rbf']
                 }
             },
-            'DecisionTreeRegressor': {
+            'DecisionTree': {
                 'model': DecisionTreeRegressor(),
                 'params': {
                     'max_depth': [None] + list(range(1, 31)),
                     'min_samples_split': randint(2, 11)
                 }
             },
-            'RandomForestRegressor': {
+            'RandomForest': {
                 'model': RandomForestRegressor(),
                 'params': {
                     'n_estimators': randint(10, 101),
                     'max_depth': [None] + list(range(10, 31))
                 }
             },
-            'BaggingRegressor': {
-                'model': BaggingRegressor(),
-                'params': {
-                    'n_estimators': randint(10, 101),
-                    'max_samples': uniform(0.5, 1.0),
-                    'max_features': uniform(0.5, 1.0)
-                }
-            },
-            'AdaBoostRegressor': {
-                'model': AdaBoostRegressor(),
-                'params': {
-                    'n_estimators': randint(10, 101),
-                    'learning_rate': uniform(0.01, 10)
-                }
-            },
-            'GradientBoostingRegressor': {
+            'GradientBoosting': {
                 'model': GradientBoostingRegressor(),
                 'params': {
                     'n_estimators': randint(10, 101),
@@ -2878,7 +3077,29 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                     'max_depth': randint(3, 8)
                 }
             },
-            'StackingRegressor': {
+            'ExtraTrees': {
+                'model': ExtraTreesRegressor(),
+                'params': {
+                    'n_estimators': randint(10, 101),
+                    'max_depth': [None] + list(range(10, 31))
+                }
+            },
+            'Bagging': {
+                'model': BaggingRegressor(),
+                'params': {
+                    'n_estimators': randint(10, 101),
+                    'max_samples': uniform(0.5, 1.0),
+                    'max_features': uniform(0.5, 1.0)
+                }
+            },
+            'AdaBoost': {
+                'model': AdaBoostRegressor(),
+                'params': {
+                    'n_estimators': randint(10, 101),
+                    'learning_rate': uniform(0.01, 10)
+                }
+            },
+            'Stacking': {
                 'model': StackingRegressor(estimators=ensemble_estimators),
                 'params': {
                     'final_estimator': [LinearRegression(), Ridge(), GradientBoostingRegressor()],
@@ -2886,8 +3107,8 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                 }
             }
         }
+
     def get_model_perfect_params() -> Dict[str, Dict[str, Union[object, Dict[str, Union[list, object]]]]]:
-        """Returns the dictionary mapping model names to models and their hyperparameter distributions."""
         return {
             'LinearRegression': {
                 'model': LinearRegression(),
@@ -2907,7 +3128,15 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                     'max_iter': randint(100, 1000)
                 }
             },
-            'KNeighborsRegressor': {
+            'ElasticNet': {
+                'model': ElasticNet(),
+                'params': {
+                    'alpha': uniform(0.01, 100),
+                    'l1_ratio': uniform(0, 1),
+                    'max_iter': randint(100, 1000)
+                }
+            },
+            'KNN': {
                 'model': KNeighborsRegressor(),
                 'params': {
                     'n_neighbors': randint(3, 50),
@@ -2926,7 +3155,7 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                     'coef0': uniform(0, 1)
                 }
             },
-            'DecisionTreeRegressor': {
+            'DecisionTree': {
                 'model': DecisionTreeRegressor(),
                 'params': {
                     'criterion': ['mse', 'friedman_mse', 'mae', 'poisson'],
@@ -2936,7 +3165,7 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                     'max_features': ['auto', 'sqrt', 'log2', None]
                 }
             },
-            'RandomForestRegressor': {
+            'RandomForest': {
                 'model': RandomForestRegressor(),
                 'params': {
                     'n_estimators': randint(50, 200),
@@ -2948,7 +3177,18 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                     'bootstrap': [True, False]
                 }
             },
-            'BaggingRegressor': {
+            'ExtraTrees': {
+                'model': ExtraTreesRegressor(),
+                'params': {
+                    'n_estimators': randint(50, 200),
+                    'max_depth': [None] + list(range(10, 31)),
+                    'min_samples_split': randint(2, 20),
+                    'min_samples_leaf': randint(1, 20),
+                    'max_features': ['auto', 'sqrt', 'log2', None],
+                    'bootstrap': [True, False]
+                }
+            },
+            'Bagging': {
                 'model': BaggingRegressor(),
                 'params': {
                     'n_estimators': randint(10, 200),
@@ -2958,7 +3198,7 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                     'bootstrap_features': [True, False]
                 }
             },
-            'AdaBoostRegressor': {
+            'AdaBoost': {
                 'model': AdaBoostRegressor(),
                 'params': {
                     'n_estimators': randint(50, 200),
@@ -2966,7 +3206,7 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                     'loss': ['linear', 'square', 'exponential']
                 }
             },
-            'GradientBoostingRegressor': {
+            'GradientBoosting': {
                 'model': GradientBoostingRegressor(),
                 'params': {
                     'n_estimators': randint(50, 200),
@@ -2992,7 +3232,7 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
                     'reg_lambda': uniform(0.5, 2)
                 }
             },
-            'StackingRegressor': {
+            'Stacking': {
                 'model': StackingRegressor(estimators=ensemble_estimators),
                 'params': {
                     'final_estimator': [LinearRegression(), Ridge(), GradientBoostingRegressor()],
@@ -3001,7 +3241,7 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
             }
         }
     
-    model_params = get_model_params()
+    model_params = get_model_perfect_params() if perfect_params else get_model_params()
     
     if model_name not in model_params:
         raise ValueError(f"Model {model_name} not recognized. Available models: {list(model_params.keys())}")
@@ -3023,26 +3263,44 @@ def random_search_regressor(model_name: str, X_train: np.ndarray, y_train: np.nd
     
     return best_params, best_score, best_estimator
 
-def get_classifier(model_name: str, x_train: Any, y_train: Any, plot: bool = False, **kwargs: Any) -> Union[
-    LogisticRegression, GaussianNB, KNeighborsClassifier, SVC, 
-    DecisionTreeClassifier, RandomForestClassifier, BaggingClassifier, 
-    AdaBoostClassifier, GradientBoostingClassifier, XGBClassifier, StackingClassifier]:
+
+
+def get_classifier(
+    model_name: Literal[
+        'logistic_regression', 'gaussian_nb', 'multinomial_nb', 'bernoulli_nb',
+        'kneighbors_classifier', 'svc', 'decision_tree_classifier', 'random_forest_classifier',
+        'bagging_classifier', 'adaboost_classifier', 'gradient_boosting_classifier',
+        'lgbm_classifier', 'xgboost_classifier', 'extra_trees_classifier', 'stacking_classifier'
+    ],
+    x_train: Any,
+    y_train: Any,
+    plot: bool = False,
+    **kwargs: Any
+) -> Union[
+    LogisticRegression, GaussianNB, MultinomialNB, BernoulliNB, KNeighborsClassifier, SVC,
+    DecisionTreeClassifier, RandomForestClassifier, BaggingClassifier, AdaBoostClassifier,
+    GradientBoostingClassifier, lgb.LGBMClassifier, XGBClassifier, ExtraTreesClassifier, StackingClassifier
+]:
     """
     Get and train a classifier model with specified parameters.
 
     Parameters:
-        model_name (str): The name of the classifier model to instantiate. Supported models:
-            - logistic_regression
-            - naive_bayes
-            - kneighbors_classifier
-            - svc
-            - decision_tree_classifier
-            - random_forest_classifier
-            - bagging_classifier
-            - adaboost_classifier
-            - gradient_boosting_classifier
-            - xgboost_classifier
-            - stacking_classifier
+        model_name (Literal): The name of the classifier model to instantiate. Supported models:
+            - 'logistic_regression'
+            - 'gaussian_nb'
+            - 'multinomial_nb'
+            - 'bernoulli_nb'
+            - 'kneighbors_classifier'
+            - 'svc'
+            - 'decision_tree_classifier'
+            - 'random_forest_classifier'
+            - 'bagging_classifier'
+            - 'adaboost_classifier'
+            - 'gradient_boosting_classifier'
+            - 'lgbm_classifier'
+            - 'xgboost_classifier'
+            - 'extra_trees_classifier'
+            - 'stacking_classifier'
         x_train (Any): Training data features.
         y_train (Any): Training data labels.
         plot (bool): If True, plot the feature importances or coefficients.
@@ -3061,7 +3319,9 @@ def get_classifier(model_name: str, x_train: Any, y_train: Any, plot: bool = Fal
     """
     model_dict = {
         'logistic_regression': LogisticRegression,
-        'naive_bayes': GaussianNB,
+        'gaussian_nb': GaussianNB,
+        'multinomial_nb': MultinomialNB,
+        'bernoulli_nb': BernoulliNB,
         'kneighbors_classifier': KNeighborsClassifier,
         'svc': SVC,
         'decision_tree_classifier': DecisionTreeClassifier,
@@ -3069,7 +3329,9 @@ def get_classifier(model_name: str, x_train: Any, y_train: Any, plot: bool = Fal
         'bagging_classifier': BaggingClassifier,
         'adaboost_classifier': AdaBoostClassifier,
         'gradient_boosting_classifier': GradientBoostingClassifier,
+        'lgbm_classifier': lgb.LGBMClassifier,
         'xgboost_classifier': XGBClassifier,
+        'extra_trees_classifier': ExtraTreesClassifier,
         'stacking_classifier': StackingClassifier,
     }
     
@@ -3138,18 +3400,32 @@ def plot_feature_importance_Classification(
     except Exception as e:
         print(f"An error occurred while plotting: {e}")
 
-def get_regressor(model_name: str, x_train: Any, y_train: Any, plot: bool = False, **kwargs: Any) -> Union[
-    LinearRegression, Ridge, Lasso, KNeighborsRegressor, SVR, 
-    DecisionTreeRegressor, RandomForestRegressor, BaggingRegressor, 
-    AdaBoostRegressor, GradientBoostingRegressor, XGBRegressor, StackingRegressor]:
+
+def get_regressor(
+    model_name: Literal[
+        'linear_regression', 'ridge_regression', 'lasso_regression', 'elasticnet_regression',
+        'kneighbors_regressor', 'svr', 'decision_tree_regressor', 'random_forest_regressor',
+        'bagging_regressor', 'adaboost_regressor', 'gradient_boosting_regressor',
+        'xgboost_regressor', 'extra_trees_regressor', 'stacking_regressor'
+    ],
+    x_train: Any,
+    y_train: Any,
+    plot: bool = False,
+    **kwargs: Any
+) -> Union[
+    LinearRegression, Ridge, Lasso, ElasticNet, KNeighborsRegressor, SVR, DecisionTreeRegressor,
+    RandomForestRegressor, BaggingRegressor, AdaBoostRegressor, GradientBoostingRegressor,
+    XGBRegressor, ExtraTreesRegressor, StackingRegressor
+]:
     """
     Get and train a regression model with specified parameters.
 
     Parameters:
-        model_name (str): The name of the regression model to instantiate. Supported models:
+        model_name (Literal): The name of the regression model to instantiate. Supported models:
             - 'linear_regression'
             - 'ridge_regression'
             - 'lasso_regression'
+            - 'elasticnet_regression'
             - 'kneighbors_regressor'
             - 'svr'
             - 'decision_tree_regressor'
@@ -3158,6 +3434,7 @@ def get_regressor(model_name: str, x_train: Any, y_train: Any, plot: bool = Fals
             - 'adaboost_regressor'
             - 'gradient_boosting_regressor'
             - 'xgboost_regressor'
+            - 'extra_trees_regressor'
             - 'stacking_regressor'
         x_train (Any): Training data features.
         y_train (Any): Training data labels.
@@ -3179,6 +3456,7 @@ def get_regressor(model_name: str, x_train: Any, y_train: Any, plot: bool = Fals
         'linear_regression': LinearRegression,
         'ridge_regression': Ridge,
         'lasso_regression': Lasso,
+        'elasticnet_regression': ElasticNet,
         'kneighbors_regressor': KNeighborsRegressor,
         'svr': SVR,
         'decision_tree_regressor': DecisionTreeRegressor,
@@ -3187,6 +3465,7 @@ def get_regressor(model_name: str, x_train: Any, y_train: Any, plot: bool = Fals
         'adaboost_regressor': AdaBoostRegressor,
         'gradient_boosting_regressor': GradientBoostingRegressor,
         'xgboost_regressor': XGBRegressor,
+        'extra_trees_regressor': ExtraTreesRegressor,
         'stacking_regressor': StackingRegressor,
     }
     
@@ -3703,6 +3982,8 @@ def evaluate_model_Classification(y_test, y_pred):
     plt.grid(True)
     plt.tight_layout()
     plt.show()
+    
+    return accuracy, recall, precision, f1, roc_auc
 
 def evaluate_model_regression(y_test, y_pred):
     """

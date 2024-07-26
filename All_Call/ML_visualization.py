@@ -2259,18 +2259,18 @@ def count_plot(df: pd.DataFrame,
     return ax
 
 
-def count_plot_all_column(categorical_features, df, vision='h'):
-    plt.figure(figsize=(20, 60))
+def count_plot_all_column(categorical_features, df, vision='h', num_of_column = 3, palette='viridis'):
+    plt.figure(figsize=(25, 60))
     plotnumber = 1
     if vision == 'h':
         for categorical_feature in categorical_features:
-            ax = plt.subplot(12, 3, plotnumber)
-            count_plot(y=categorical_feature, df=df, ax=ax)
+            ax = plt.subplot(12, num_of_column, plotnumber)
+            count_plot(y=categorical_feature, palette=palette, df=df, ax=ax)
             plotnumber += 1
     elif vision == 'x' or vision == 'v':
         for categorical_feature in categorical_features:
-            ax = plt.subplot(12, 3, plotnumber)
-            count_plot(x=categorical_feature, df=df, ax=ax)
+            ax = plt.subplot(12, num_of_column, plotnumber)
+            count_plot(x=categorical_feature, palette=palette, df=df, ax=ax)
             plt.xticks(rotation=45)
             plotnumber += 1
     plt.tight_layout()
